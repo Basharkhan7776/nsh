@@ -1,0 +1,12 @@
+# Rust
+nsh/target/
+**/*.rs.bk
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# OS files
+.DS_Store
+Thumbs.db
