@@ -1,1 +1,0 @@
-{"rustc":4826714390000139368,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[12211072277322848304,"build_script_build",false,4984078343676907668]],"local":[{"RerunIfChanged":{"output":"debug/build/lance-linalg-736ba14b3c56c8f5/output","paths":["src/simd/f16.c"]}}],"rustflags":[],"config":0,"compile_kind":0}
