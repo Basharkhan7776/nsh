@@ -1,0 +1,15 @@
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/lance_file-d69e47e9fe895e23.d: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/datatypes.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format/metadata.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/page_table.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/reader.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer/statistics.rs /home/bashar-khan/projects/nsh/nsh/target/debug/build/lance-file-d56e2fb21496a543/out/lance.file.rs
+
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/liblance_file-d69e47e9fe895e23.rmeta: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/datatypes.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format/metadata.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/page_table.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/reader.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer/statistics.rs /home/bashar-khan/projects/nsh/nsh/target/debug/build/lance-file-d56e2fb21496a543/out/lance.file.rs
+
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/lib.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/datatypes.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/format/metadata.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/page_table.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/reader.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/lance-file-0.10.2/src/writer/statistics.rs:
+/home/bashar-khan/projects/nsh/nsh/target/debug/build/lance-file-d56e2fb21496a543/out/lance.file.rs:
+
+# env-dep:OUT_DIR=/home/bashar-khan/projects/nsh/nsh/target/debug/build/lance-file-d56e2fb21496a543/out

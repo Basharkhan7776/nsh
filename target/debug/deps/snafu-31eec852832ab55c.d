@@ -1,0 +1,12 @@
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/snafu-31eec852832ab55c.d: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/backtrace_inert.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/once_bool.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/error_chain.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/Snafu.md /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.md /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/../README.md
+
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/libsnafu-31eec852832ab55c.rmeta: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/backtrace_inert.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/once_bool.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/error_chain.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/Snafu.md /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.md /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/../README.md
+
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/lib.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/backtrace_inert.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/once_bool.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/error_chain.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/Snafu.md:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/report.md:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/snafu-0.7.5/src/../README.md:

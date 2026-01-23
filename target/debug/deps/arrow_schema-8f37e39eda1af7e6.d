@@ -1,0 +1,10 @@
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/arrow_schema-8f37e39eda1af7e6.d: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/datatype.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/error.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/field.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/fields.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/schema.rs
+
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/libarrow_schema-8f37e39eda1af7e6.rmeta: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/datatype.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/error.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/field.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/fields.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/schema.rs
+
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/lib.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/datatype.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/error.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/field.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/fields.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/arrow-schema-50.0.0/src/schema.rs:

@@ -1,0 +1,9 @@
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/text_splitter-4633a141ce7492e2.d: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size/characters.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/text.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/../README.md
+
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/libtext_splitter-4633a141ce7492e2.rmeta: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size/characters.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/text.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/../README.md
+
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/lib.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/chunk_size/characters.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/text.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/text-splitter-0.10.0/src/../README.md:

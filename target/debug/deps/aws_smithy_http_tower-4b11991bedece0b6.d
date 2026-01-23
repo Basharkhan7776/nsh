@@ -1,0 +1,8 @@
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/aws_smithy_http_tower-4b11991bedece0b6.d: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/dispatch.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/map_request.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/parse_response.rs
+
+/home/bashar-khan/projects/nsh/nsh/target/debug/deps/libaws_smithy_http_tower-4b11991bedece0b6.rmeta: /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/lib.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/dispatch.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/map_request.rs /home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/parse_response.rs
+
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/lib.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/dispatch.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/map_request.rs:
+/home/bashar-khan/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-http-tower-0.56.1/src/parse_response.rs:
