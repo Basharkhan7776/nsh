@@ -117,7 +117,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "nsh-own"
+name = "nsh"
 version = "0.1.0"
 dependencies = [
  "rustyline",

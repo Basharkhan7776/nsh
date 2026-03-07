@@ -1,5 +1,5 @@
 [package]
-name = "nsh-own"
+name = "nsh"
 version = "0.1.0"
 edition = "2024"
 

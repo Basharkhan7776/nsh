@@ -1,22 +1,57 @@
 use rustyline::{
     completion::FilenameCompleter, error::ReadlineError, highlight::MatchingBracketHighlighter,
     hint::HistoryHinter, history::FileHistory, validate::MatchingBracketValidator, Completer,
-    CompletionType, Config, Editor, Helper, Highlighter, Hinter, Validator,
+    CompletionType, Config, Editor, Helper, Hinter, Validator,
 };
 use std::env;
 use std::process::Command;
+use std::borrow::Cow;
 
 // 1. Define a Helper to manage completions, hints, and highlights
-#[derive(Helper, Completer, Hinter, Highlighter, Validator)]
+#[derive(Helper, Completer, Hinter, Validator)]
 struct NshHelper {
     #[rustyline(Completer)]
     completer: FilenameCompleter,
-    #[rustyline(Highlighter)]
     highlighter: MatchingBracketHighlighter,
     #[rustyline(Validator)]
     validator: MatchingBracketValidator,
     #[rustyline(Hinter)]
     hinter: HistoryHinter,
+}
+
+impl rustyline::highlight::Highlighter for NshHelper {
+    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
+        let mut colored_line = String::new();
+        let mut parts = line.splitn(2, ' ');
+        
+        if let Some(cmd) = parts.next() {
+            let color = match cmd {
+                "ask" | "do" | "code" => "\x1b[1;35m", // Bold Magenta for AI
+                "exit" | "quit" | "cd" => "\x1b[1;33m", // Bold Yellow for Built-ins
+                _ => "\x1b[1;32m",                      // Bold Green for System Binaries
+            };
+            colored_line.push_str(&format!("{}{}\x1b[0m", color, cmd));
+        }
+        
+        if let Some(rest) = parts.next() {
+            colored_line.push(' ');
+            colored_line.push_str(rest); 
+        }
+        
+        if colored_line.is_empty() { Cow::Borrowed(line) } else { Cow::Owned(colored_line) }
+    }
+
+    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
+        Cow::Owned(format!("\x1b[90m{}\x1b[0m", hint)) // Bright Black (Gray)
+    }
+
+    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&self, prompt: &'p str, default: bool) -> Cow<'b, str> {
+        if default { Cow::Owned(format!("\x1b[1;36m{}\x1b[0m", prompt)) } else { Cow::Borrowed(prompt) }
+    }
+
+    fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
+        self.highlighter.highlight_char(line, pos, kind)
+    }
 }
 
 fn main() {
@@ -63,7 +98,7 @@ fn main() {
                         println!("Quiting nsh!!");
                         break;
                     }
-                    "cd" => {
+                    "cd" => { // cd won't work with child process
                         let target = if args.is_empty() {
                             env::var("HOME").unwrap_or_else(|_| String::from("/"))
                         } else {
@@ -73,6 +108,28 @@ fn main() {
                             eprintln!("nsh: cd: {} - {}", target, e);
                         }
                     }
+                    // --- TUI AI HANDLERS GO HERE ---
+                    "ask" => {
+                        println!("🧠 Generating response for: {}", args.join(" "));
+                        // TODO: Trigger interactive spinner and stream markdown response
+                    }
+                    "do" => {
+                        println!("⚙️ Proposing command for: {}", args.join(" "));
+                        // TODO: Render interactive confirmation prompt (Y/n)
+                    }
+                    "plan" => {
+                        println!("📋 Planning for: {}", args.join(" "));
+                        // TODO: Render interactive confirmation prompt (Y/n)
+                    }
+                    "build" => {
+                        println!("💻 Generating code for: {}", args.join(" "));
+                        // TODO: Render interactive confirmation prompt (Y/n)
+                    }
+                    "settings" => { //mainly for model selection
+                        println!("⚙️ Settings for: {}", args.join(" "));
+                        // TODO: Render interactive confirmation prompt (Y/n)
+                    }
+                    // --- OS EXECUTION ---
                     _ => {
                         let child = Command::new(program).args(args).spawn();
 
