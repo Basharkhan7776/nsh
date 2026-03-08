@@ -1,6 +1,6 @@
 use rustyline::{
-    completion::FilenameCompleter, error::ReadlineError, highlight::MatchingBracketHighlighter,
-    hint::HistoryHinter, history::FileHistory, validate::MatchingBracketValidator, Completer,
+    completion::Completer, error::ReadlineError, highlight::MatchingBracketHighlighter,
+    hint::HistoryHinter, history::FileHistory, validate::MatchingBracketValidator,
     CompletionType, Config, Editor, Helper, Hinter, Validator,
 };
 use std::env;
@@ -8,15 +8,91 @@ use std::process::Command;
 use std::borrow::Cow;
 
 // 1. Define a Helper to manage completions, hints, and highlights
-#[derive(Helper, Completer, Hinter, Validator)]
+#[derive(Helper, Hinter, Validator)]
 struct NshHelper {
-    #[rustyline(Completer)]
-    completer: FilenameCompleter,
     highlighter: MatchingBracketHighlighter,
     #[rustyline(Validator)]
     validator: MatchingBracketValidator,
     #[rustyline(Hinter)]
     hinter: HistoryHinter,
+}
+
+impl Completer for NshHelper {
+    type Candidate = rustyline::completion::Pair;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
+        // Find the start of the word being completed
+        let (start, word) = rustyline::completion::extract_word(line, pos, None, |c| c == ' ' || c == '\t');
+        let word_lower = word.to_lowercase();
+        
+        let mut candidates = Vec::new();
+
+        let commands = ["ask", "do", "plan", "build", "settings", "exit", "quit", "cd", "code"];
+        // Only suggest commands at the beginning of the line
+        if start == 0 {
+            for cmd in commands {
+                if cmd.starts_with(&word_lower) {
+                    candidates.push(rustyline::completion::Pair {
+                        display: cmd.to_string(),
+                        replacement: cmd.to_string(),
+                    });
+                }
+            }
+        }
+        
+        let (dir_str, file_prefix) = match word.rfind('/') {
+            Some(idx) => (&word[..=idx], &word[idx + 1..]),
+            None => (".", word),
+        };
+
+        let expanded_dir = if dir_str.starts_with('~') {
+            if let Ok(home) = std::env::var("HOME") {
+                dir_str.replacen('~', &home, 1)
+            } else {
+                dir_str.to_string()
+            }
+        } else {
+            dir_str.to_string()
+        };
+
+        let dir_path = std::path::Path::new(if expanded_dir == "." { "." } else { &expanded_dir });
+        
+        if let Ok(entries) = std::fs::read_dir(dir_path) {
+            let prefix_lower = file_prefix.to_lowercase();
+            for entry in entries.flatten() {
+                if let Some(name) = entry.file_name().to_str() {
+                    if name.to_lowercase().starts_with(&prefix_lower) {
+                        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
+                        let mut display = name.to_string();
+                        if is_dir {
+                            display.push('/');
+                        }
+                        
+                        let mut replacement = if dir_str == "." {
+                            display.clone()
+                        } else {
+                            format!("{}{}", dir_str, display)
+                        };
+                        
+                        // Basic space escaping
+                        replacement = replacement.replace(" ", "\\ ");
+                        
+                        candidates.push(rustyline::completion::Pair {
+                            display,
+                            replacement,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok((start, candidates))
+    }
 }
 
 impl rustyline::highlight::Highlighter for NshHelper {
@@ -26,27 +102,32 @@ impl rustyline::highlight::Highlighter for NshHelper {
         
         if let Some(cmd) = parts.next() {
             let color = match cmd {
-                "ask" | "do" | "code" => "\x1b[1;35m", // Bold Magenta for AI
-                "exit" | "quit" | "cd" => "\x1b[1;33m", // Bold Yellow for Built-ins
-                _ => "\x1b[1;32m",                      // Bold Green for System Binaries
+                // AI commands: Bold Red on Black background
+                "ask" | "do" | "code" | "plan" | "build" | "settings" => "\x1b[1;31;40m", 
+                // Built-ins: Bold White on Black background
+                "exit" | "quit" | "cd" => "\x1b[1;37;40m", 
+                // System Binaries: Bold Gray on Black background
+                _ => "\x1b[1;90;40m",                      
             };
             colored_line.push_str(&format!("{}{}\x1b[0m", color, cmd));
         }
         
         if let Some(rest) = parts.next() {
             colored_line.push(' ');
-            colored_line.push_str(rest); 
+            // Rest of the arguments: White on Black background
+            colored_line.push_str(&format!("\x1b[37;40m{}\x1b[0m", rest)); 
         }
         
         if colored_line.is_empty() { Cow::Borrowed(line) } else { Cow::Owned(colored_line) }
     }
 
     fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[90m{}\x1b[0m", hint)) // Bright Black (Gray)
+        Cow::Owned(format!("\x1b[90;40m{}\x1b[0m", hint)) // Gray with Black bg
     }
 
     fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&self, prompt: &'p str, default: bool) -> Cow<'b, str> {
-        if default { Cow::Owned(format!("\x1b[1;36m{}\x1b[0m", prompt)) } else { Cow::Borrowed(prompt) }
+        // Prompt in Bold Red with Black bg
+        if default { Cow::Owned(format!("\x1b[1;31;40m{}\x1b[0m", prompt)) } else { Cow::Borrowed(prompt) }
     }
 
     fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
@@ -63,7 +144,6 @@ fn main() {
         Editor::with_config(config).expect("Failed to init rust rl");
 
     let helper = NshHelper {
-        completer: FilenameCompleter::new(),
         highlighter: MatchingBracketHighlighter::new(),
         validator: MatchingBracketValidator::new(),
         hinter: HistoryHinter {},
@@ -76,7 +156,7 @@ fn main() {
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("/"); //showing last / ele
-        let prompt = format!("nsh:{} ~ ", last);
+        let prompt = format!("~ {} : ", last);
         let readline = rl.readline(&prompt);
 
         match readline {
@@ -110,23 +190,23 @@ fn main() {
                     }
                     // --- TUI AI HANDLERS GO HERE ---
                     "ask" => {
-                        println!("🧠 Generating response for: {}", args.join(" "));
+                        println!("\x1b[1;31;40m🧠 Generating response for:\x1b[0m \x1b[37;40m{}\x1b[0m", args.join(" "));
                         // TODO: Trigger interactive spinner and stream markdown response
                     }
                     "do" => {
-                        println!("⚙️ Proposing command for: {}", args.join(" "));
+                        println!("\x1b[1;31;40m⚙️ Proposing command for:\x1b[0m \x1b[37;40m{}\x1b[0m", args.join(" "));
                         // TODO: Render interactive confirmation prompt (Y/n)
                     }
                     "plan" => {
-                        println!("📋 Planning for: {}", args.join(" "));
+                        println!("\x1b[1;31;40m📋 Planning for:\x1b[0m \x1b[37;40m{}\x1b[0m", args.join(" "));
                         // TODO: Render interactive confirmation prompt (Y/n)
                     }
                     "build" => {
-                        println!("💻 Generating code for: {}", args.join(" "));
+                        println!("\x1b[1;31;40m💻 Generating code for:\x1b[0m \x1b[37;40m{}\x1b[0m", args.join(" "));
                         // TODO: Render interactive confirmation prompt (Y/n)
                     }
                     "settings" => { //mainly for model selection
-                        println!("⚙️ Settings for: {}", args.join(" "));
+                        println!("\x1b[1;31;40m⚙️ Settings for:\x1b[0m \x1b[37;40m{}\x1b[0m", args.join(" "));
                         // TODO: Render interactive confirmation prompt (Y/n)
                     }
                     // --- OS EXECUTION ---
