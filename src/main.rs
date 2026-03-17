@@ -1,278 +1,300 @@
-use rustyline::{
-    CompletionType, Config, Editor, Helper, Hinter, Validator, completion::Completer,
-    error::ReadlineError, highlight::MatchingBracketHighlighter, hint::HistoryHinter,
-    history::FileHistory, validate::MatchingBracketValidator,
+use crossterm::{
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use std::borrow::Cow;
-use std::env;
-use std::process::Command;
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Style},
+    text::Line,
+    widgets::{Block, Borders, Paragraph},
+    Terminal,
+};
 
-// 1. Define a Helper to manage completions, hints, and highlights
-#[derive(Helper, Hinter, Validator)]
-struct NshHelper {
-    highlighter: MatchingBracketHighlighter,
-    #[rustyline(Validator)]
-    validator: MatchingBracketValidator,
-    #[rustyline(Hinter)]
-    hinter: HistoryHinter,
+struct App {
+    output_lines: Vec<String>,
+    input: String,
+    cursor_position: usize,
+    scroll_offset: usize,
 }
 
-impl Completer for NshHelper {
-    type Candidate = rustyline::completion::Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &rustyline::Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Self::Candidate>)> {
-        // Find the start of the word being completed
-        let (start, word) =
-            rustyline::completion::extract_word(line, pos, None, |c| c == ' ' || c == '\t');
-        let word_lower = word.to_lowercase();
-
-        let mut candidates = Vec::new();
-
-        let commands = [
-            "ask", "do", "plan", "build", "settings", "exit", "quit", "cd", "code",
-        ];
-        // Only suggest commands at the beginning of the line
-        if start == 0 {
-            for cmd in commands {
-                if cmd.starts_with(&word_lower) {
-                    candidates.push(rustyline::completion::Pair {
-                        display: cmd.to_string(),
-                        replacement: cmd.to_string(),
-                    });
-                }
-            }
+impl App {
+    fn new() -> Self {
+        Self {
+            output_lines: Vec::new(),
+            input: String::new(),
+            cursor_position: 0,
+            scroll_offset: 0,
         }
+    }
 
-        let (dir_str, file_prefix) = match word.rfind('/') {
-            Some(idx) => (&word[..=idx], &word[idx + 1..]),
-            None => (".", word),
-        };
+    fn add_line(&mut self, line: &str) {
+        self.output_lines.push(line.to_string());
+        self.scroll_to_bottom();
+    }
 
-        let expanded_dir = if dir_str.starts_with('~') {
-            if let Ok(home) = std::env::var("HOME") {
-                dir_str.replacen('~', &home, 1)
+    fn scroll_to_bottom(&mut self) {
+        let max_scroll = self.output_lines.len().saturating_sub(1);
+        self.scroll_offset = max_scroll;
+    }
+
+    fn scroll_up(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    fn scroll_down(&mut self) {
+        let max_scroll = self.output_lines.len().saturating_sub(1);
+        if self.scroll_offset < max_scroll {
+            self.scroll_offset += 1;
+        }
+    }
+}
+
+fn execute_command(input: &str, app: &mut App, _cwd: &str) {
+    let input = input.trim();
+    if input.is_empty() {
+        return;
+    }
+
+    let mut parts = input.split_whitespace();
+    let program = parts.next().unwrap();
+    let args: Vec<&str> = parts.collect();
+
+    match program {
+        "exit" | "quit" => {}
+        "cd" => {
+            let target = if args.is_empty() {
+                std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
             } else {
-                dir_str.to_string()
-            }
-        } else {
-            dir_str.to_string()
-        };
-
-        let dir_path = std::path::Path::new(if expanded_dir == "." {
-            "."
-        } else {
-            &expanded_dir
-        });
-
-        if let Ok(entries) = std::fs::read_dir(dir_path) {
-            let prefix_lower = file_prefix.to_lowercase();
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.to_lowercase().starts_with(&prefix_lower) {
-                        let is_dir = entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false);
-                        let mut display = name.to_string();
-                        if is_dir {
-                            display.push('/');
-                        }
-
-                        let mut replacement = if dir_str == "." {
-                            display.clone()
-                        } else {
-                            format!("{}{}", dir_str, display)
-                        };
-
-                        // Basic space escaping
-                        replacement = replacement.replace(" ", "\\ ");
-
-                        candidates.push(rustyline::completion::Pair {
-                            display,
-                            replacement,
-                        });
-                    }
-                }
-            }
-        }
-
-        Ok((start, candidates))
-    }
-}
-
-impl rustyline::highlight::Highlighter for NshHelper {
-    fn highlight<'l>(&self, line: &'l str, _pos: usize) -> Cow<'l, str> {
-        let mut colored_line = String::new();
-        let mut parts = line.splitn(2, ' ');
-
-        if let Some(cmd) = parts.next() {
-            let color = match cmd {
-                // AI commands: Bold Red on Black background
-                "ask" | "do" | "code" | "plan" | "build" | "settings" => "\x1b[1;31;40m",
-                // Built-ins: Bold White on Black background
-                "exit" | "quit" | "cd" => "\x1b[1;37;40m",
-                // System Binaries: Bold Gray on Black background
-                _ => "\x1b[1;90;40m",
+                args[0].to_string()
             };
-            colored_line.push_str(&format!("{}{}\x1b[0m", color, cmd));
+            if let Err(e) = std::env::set_current_dir(&target) {
+                app.add_line(&format!("\x1b[1;31mcd: {}: {}\x1b[0m", target, e));
+            }
         }
-
-        if let Some(rest) = parts.next() {
-            colored_line.push(' ');
-            // Rest of the arguments: White on Black background
-            colored_line.push_str(&format!("\x1b[37;40m{}\x1b[0m", rest));
+        "clear" => {
+            app.output_lines.clear();
+            app.scroll_offset = 0;
+            return;
         }
-
-        if colored_line.is_empty() {
-            Cow::Borrowed(line)
-        } else {
-            Cow::Owned(colored_line)
+        "help" => {
+            app.add_line("\x1b[1;36mAvailable commands:\x1b[0m");
+            app.add_line("  \x1b[31mask\x1b[0m <question>  - Ask AI");
+            app.add_line("  \x1b[31mdo\x1b[0m <task>      - Execute task");
+            app.add_line("  \x1b[31mplan\x1b[0m <goal>      - Plan goal");
+            app.add_line("  \x1b[31mbuild\x1b[0m <project>  - Build project");
+            app.add_line("  \x1b[31mcd\x1b[0m <dir>        - Change directory");
+            app.add_line("  \x1b[31mclear\x1b[0m          - Clear screen");
+            app.add_line("  \x1b[31mexit\x1b[0m / \x1b[31mquit\x1b[0m   - Exit shell");
+            return;
         }
-    }
+        _ => {
+            use std::io::BufRead;
+            use std::io::BufReader;
+            use std::process::{Command, Stdio};
 
-    fn highlight_hint<'h>(&self, hint: &'h str) -> Cow<'h, str> {
-        Cow::Owned(format!("\x1b[90;40m{}\x1b[0m", hint)) // Gray with Black bg
-    }
+            let child = Command::new(program)
+                .args(&args)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
 
-    fn highlight_prompt<'b, 's: 'b, 'p: 'b>(&self, prompt: &'p str, default: bool) -> Cow<'b, str> {
-        // Prompt in Bold Red with Black bg
-        if default {
-            Cow::Owned(format!("\x1b[1;31;40m{}\x1b[0m", prompt))
-        } else {
-            Cow::Borrowed(prompt)
+            match child {
+                Ok(mut child) => {
+                    if let Some(stdout) = child.stdout.take() {
+                        let reader = BufReader::new(stdout);
+                        for line in reader.lines() {
+                            if let Ok(line) = line {
+                                app.add_line(&line);
+                            }
+                        }
+                    }
+                    if let Some(stderr) = child.stderr.take() {
+                        let reader = BufReader::new(stderr);
+                        for line in reader.lines() {
+                            if let Ok(line) = line {
+                                app.add_line(&format!("\x1b[1;31m{}\x1b[0m", line));
+                            }
+                        }
+                    }
+                    child.wait().ok();
+                }
+                Err(_e) => {
+                    app.add_line(&format!("\x1b[1;31m{}: command not found\x1b[0m", program));
+                }
+            }
+            return;
         }
-    }
-
-    fn highlight_char(&self, line: &str, pos: usize, kind: rustyline::highlight::CmdKind) -> bool {
-        self.highlighter.highlight_char(line, pos, kind)
     }
 }
 
-fn main() {
-    let config = Config::builder()
-        .completion_type(CompletionType::List)
-        .build();
+fn main() -> std::io::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
 
-    let mut rl: Editor<NshHelper, FileHistory> =
-        Editor::with_config(config).expect("Failed to init rust rl");
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
 
-    let helper = NshHelper {
-        highlighter: MatchingBracketHighlighter::new(),
-        validator: MatchingBracketValidator::new(),
-        hinter: HistoryHinter {},
-    };
-    rl.set_helper(Some(helper));
+    let mut app = App::new();
+    app.add_line("\x1b[1;36mWelcome to nsh - AI-Powered Shell\x1b[0m");
+    app.add_line("\x1b[90mType 'help' for commands\x1b[0m");
+    app.add_line("");
 
-    loop {
-        let cwd = env::current_dir().unwrap_or_default(); //current working dir
-        let last = cwd
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("/"); //showing last / ele
-        let prompt = format!("~ {} : ", last);
-        let readline = rl.readline(&prompt);
+    let mut running = true;
 
-        match readline {
-            Ok(line) => {
-                let input = line.trim();
+    while running {
+        let cwd = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "~".to_string());
 
-                if input.is_empty() {
-                    continue;
-                }
+        terminal.draw(|f| {
+            let black = Style::default().bg(Color::Black);
+            let red = Style::default().fg(Color::Red).bg(Color::Black);
+            let white = Style::default().fg(Color::White).bg(Color::Black);
+            let _gray = Style::default().fg(Color::DarkGray).bg(Color::Black);
 
-                let _ = rl.add_history_entry(input);
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(3)])
+                .split(f.area());
 
-                let mut parts = input.split_whitespace();
-                let program = parts.next().unwrap();
-                let args: Vec<&str> = parts.collect();
+            let output_area = chunks[0];
+            let input_area = chunks[1];
 
-                match program {
-                    "exit" | "quit" => {
-                        println!("Quiting nsh!!");
-                        break;
-                    }
-                    "cd" => {
-                        // cd won't work with child process
-                        let target = if args.is_empty() {
-                            env::var("HOME").unwrap_or_else(|_| String::from("/"))
-                        } else {
-                            args[0].to_string()
-                        };
-                        if let Err(e) = env::set_current_dir(&target) {
-                            eprintln!("nsh: cd: {} - {}", target, e);
-                        }
-                    }
-                    // --- TUI AI HANDLERS GO HERE ---
-                    "ask" => {
-                        println!(
-                            "\x1b[1;31;40m>> Generating response for:\x1b[0m \x1b[37;40m{}\x1b[0m",
-                            args.join(" ")
-                        );
-                        // TODO: Trigger interactive spinner and stream markdown response
-                    }
-                    "do" => {
-                        println!(
-                            "\x1b[1;31;40m>> Proposing command for:\x1b[0m \x1b[37;40m{}\x1b[0m",
-                            args.join(" ")
-                        );
-                        // TODO: Render interactive confirmation prompt (Y/n)
-                    }
-                    "plan" => {
-                        println!(
-                            "\x1b[1;31;40m>> Planning for:\x1b[0m \x1b[37;40m{}\x1b[0m",
-                            args.join(" ")
-                        );
-                        // TODO: Render interactive confirmation prompt (Y/n)
-                    }
-                    "build" => {
-                        println!(
-                            "\x1b[1;31;40m>> Generating code for:\x1b[0m \x1b[37;40m{}\x1b[0m",
-                            args.join(" ")
-                        );
-                        // TODO: Render interactive confirmation prompt (Y/n)
-                    }
-                    "settings" => {
-                        //mainly for model selection
-                        println!(
-                            "\x1b[1;31;40m⚙️ Settings for:\x1b[0m \x1b[37;40m{}\x1b[0m",
-                            args.join(" ")
-                        );
-                        // TODO: Render interactive confirmation prompt (Y/n)
-                    }
-                    // --- OS EXECUTION ---
-                    _ => {
-                        let child = Command::new(program).args(args).spawn();
+            let visible_lines: Vec<Line> = app
+                .output_lines
+                .iter()
+                .skip(app.scroll_offset)
+                .map(|line| Line::from(line.as_str()))
+                .collect();
 
-                        match child {
-                            Ok(mut child_process) => {
-                                child_process.wait().unwrap();
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "nsh: command not found or execution error: {} - {}",
-                                    program, e
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                // Handle Ctrl-C
-                println!("^C");
+            let output_widget = Paragraph::new(visible_lines)
+                .block(
+                    Block::default()
+                        .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
+                        .border_style(red),
+                )
+                .style(black)
+                .scroll((app.scroll_offset as u16, 0));
+            f.render_widget(output_widget, output_area);
+
+            let prompt_len = cwd.len() + 4;
+            let input_with_prompt =
+                format!("\x1b[1;31m{}\x1b[0m\x1b[90m $\x1b[0m {}", cwd, app.input);
+            let input_widget = Paragraph::new(input_with_prompt.as_str())
+                .block(Block::default().borders(Borders::ALL).border_style(red))
+                .style(white);
+            f.render_widget(input_widget, input_area);
+
+            let cursor_x = (prompt_len + app.cursor_position) as u16;
+            f.set_cursor_position(ratatui::layout::Position {
+                x: cursor_x.min(input_area.width.saturating_sub(1)),
+                y: input_area.y + 1,
+            });
+        })?;
+
+        if let Event::Key(key) = event::read()? {
+            if key.kind != KeyEventKind::Press {
                 continue;
             }
-            Err(ReadlineError::Eof) => {
-                // Handle Ctrl-D
-                println!("exit");
-                break;
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
+
+            match key.code {
+                KeyCode::Char(c) => {
+                    if key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                        if c == 'c' {
+                            app.add_line("");
+                            app.add_line("\x1b[90m^C\x1b[0m");
+                            app.input.clear();
+                            app.cursor_position = 0;
+                        } else if c == 'd' {
+                            if app.input.is_empty() {
+                                running = false;
+                            }
+                        }
+                    } else {
+                        app.input.insert(app.cursor_position, c);
+                        app.cursor_position += 1;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if app.cursor_position > 0 {
+                        app.cursor_position -= 1;
+                        app.input.remove(app.cursor_position);
+                    }
+                }
+                KeyCode::Delete => {
+                    if app.cursor_position < app.input.len() {
+                        app.input.remove(app.cursor_position);
+                    }
+                }
+                KeyCode::Left => {
+                    if app.cursor_position > 0 {
+                        app.cursor_position -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if app.cursor_position < app.input.len() {
+                        app.cursor_position += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|_| "~".to_string());
+                    app.add_line(&format!(
+                        "\x1b[1;31m{}\x1b[0m\x1b[90m $\x1b[0m {}",
+                        cwd, app.input
+                    ));
+
+                    let input = app.input.clone();
+
+                    if input == "exit" || input == "quit" {
+                        running = false;
+                    } else if !input.is_empty() {
+                        execute_command(&input, &mut app, &cwd);
+                    }
+
+                    app.input.clear();
+                    app.cursor_position = 0;
+                }
+                KeyCode::Up => {
+                    app.scroll_up();
+                }
+                KeyCode::Down => {
+                    app.scroll_down();
+                }
+                KeyCode::PageUp => {
+                    for _ in 0..10 {
+                        app.scroll_up();
+                    }
+                }
+                KeyCode::PageDown => {
+                    for _ in 0..10 {
+                        app.scroll_down();
+                    }
+                }
+                KeyCode::Home => {
+                    app.cursor_position = 0;
+                }
+                KeyCode::End => {
+                    app.cursor_position = app.input.len();
+                }
+                _ => {}
             }
         }
     }
+
+    disable_raw_mode()?;
+    execute!(
+        terminal.backend_mut(),
+        LeaveAlternateScreen,
+        DisableMouseCapture
+    )?;
+    println!("\nGoodbye!");
+
+    Ok(())
 }

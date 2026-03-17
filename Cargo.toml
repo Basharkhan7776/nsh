@@ -4,8 +4,5 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crossbeam-channel = "0.5.15"
-crossterm = "0.29.0"
-nu-ansi-term = "0.50.3"
-reedline = "0.46.0"
-rustyline = { version = "17.0.2", features = ["derive"] }
+crossterm = "0.29"
+ratatui = "0.29"
