@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{List, ListItem, Paragraph},
     Terminal,
 };
 use std::sync::LazyLock;
@@ -50,12 +50,12 @@ struct App {
     current_input: String,
     cursor_position: usize,
     scroll_offset: usize,
+    total_lines: usize,
     current_suggestions: Vec<String>,
     show_suggestions: bool,
     selected_suggestion: usize,
     saved_input: String,
     history_index: Option<usize>,
-    input_height: usize,
 }
 
 impl App {
@@ -65,55 +65,38 @@ impl App {
             current_input: String::new(),
             cursor_position: 0,
             scroll_offset: 0,
+            total_lines: 0,
             current_suggestions: Vec::new(),
             show_suggestions: false,
             selected_suggestion: 0,
             saved_input: String::new(),
             history_index: None,
-            input_height: 3,
         }
     }
 
-    fn add_command(&mut self, command: String, cwd: String) {
-        self.entries.push(Entry {
-            entry_type: EntryType::Command,
-            content: vec![command],
-            cwd,
-        });
+    fn add_entry(&mut self, entry: Entry) {
+        self.entries.push(entry);
+        self.recalc_total_lines();
+        self.scroll_to_bottom();
     }
 
-    fn add_output(&mut self, output: Vec<String>) {
-        if !output.is_empty() {
-            self.entries.push(Entry {
-                entry_type: EntryType::Output,
-                content: output,
-                cwd: String::new(),
-            });
-        }
-    }
-
-    fn add_system(&mut self, content: Vec<String>) {
-        self.entries.push(Entry {
-            entry_type: EntryType::System,
-            content,
-            cwd: String::new(),
-        });
+    fn recalc_total_lines(&mut self) {
+        self.total_lines = self.entries.iter().map(|e| e.content.len()).sum();
     }
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.total_lines = 0;
         self.scroll_offset = 0;
     }
 
     fn scroll_to_bottom(&mut self) {
-        let total = self.entries.len();
-        let visible = self.visible_entries_count();
-        self.scroll_offset = total.saturating_sub(visible);
+        let visible = self.visible_count();
+        self.scroll_offset = self.total_lines.saturating_sub(visible);
     }
 
-    fn visible_entries_count(&self) -> usize {
-        let total_height = self.entries.len();
-        total_height
+    fn visible_count(&self) -> usize {
+        20
     }
 
     fn get_history_commands(&self) -> Vec<String> {
@@ -250,73 +233,92 @@ fn render(
     app: &App,
 ) -> std::io::Result<()> {
     terminal.draw(|f| {
-        let black = Style::default().bg(Color::Black);
-        let red = Style::default().fg(Color::Red).bg(Color::Black);
-        let white = Style::default().fg(Color::White).bg(Color::Black);
-        let _cyan = Style::default().fg(Color::Cyan).bg(Color::Black);
-        let gray = Style::default().fg(Color::DarkGray).bg(Color::Black);
+        let output_bg = Style::default().bg(Color::Black);
+        let output_fg = Style::default().fg(Color::White).bg(Color::Black);
+        let prompt_fg = Style::default().fg(Color::Green).bg(Color::Black);
+
+        let input_bg = Style::default().bg(Color::Rgb(30, 30, 30));
+        let input_fg = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 30));
+        let input_prompt_fg = Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30));
+
+        let gray = Style::default()
+            .fg(Color::DarkGray)
+            .bg(Color::Rgb(30, 30, 30));
 
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(app.input_height as u16),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
             .split(f.area());
 
         let list_area = chunks[0];
         let input_area = chunks[1];
 
         let visible_height = list_area.height as usize;
-        let start_idx = app.scroll_offset;
-        let end_idx = (start_idx + visible_height).min(app.entries.len());
+        let content_height = app.entries.iter().map(|e| e.content.len()).sum::<usize>();
 
+        let start_line = app.scroll_offset;
+        let end_line = (start_line + visible_height).min(content_height);
+
+        let mut current_line = 0;
         let mut items: Vec<ListItem> = Vec::new();
 
-        for i in start_idx..end_idx {
-            if let Some(entry) = app.entries.get(i) {
-                match entry.entry_type {
-                    EntryType::Command => {
-                        if let Some(cmd) = entry.content.first() {
-                            let line =
-                                format!("\x1b[1;31m{}\x1b[0m\x1b[90m $\x1b[0m {}", entry.cwd, cmd);
-                            items.push(ListItem::new(Line::from(Span::raw(line))).style(white));
+        for entry in &app.entries {
+            let entry_height = entry.content.len();
+            let entry_end = current_line + entry_height;
+
+            if entry_end <= start_line {
+                current_line = entry_end;
+                continue;
+            }
+
+            let skip = if current_line < start_line {
+                start_line - current_line
+            } else {
+                0
+            };
+
+            let show_from = current_line + skip;
+            let show_to = entry_end.min(end_line);
+
+            for i in show_from..show_to {
+                let line_idx = i - current_line;
+                if let Some(line) = entry.content.get(line_idx) {
+                    match entry.entry_type {
+                        EntryType::Command => {
+                            if let Some(cmd) = entry.content.first() {
+                                if i == current_line {
+                                    let display = format!("{} $ {}", entry.cwd, cmd);
+                                    items.push(ListItem::new(Line::from(Span::styled(
+                                        display, prompt_fg,
+                                    ))));
+                                }
+                            }
                         }
-                    }
-                    EntryType::Output => {
-                        for line in &entry.content {
-                            items.push(ListItem::new(Line::from(Span::raw(line))).style(white));
+                        EntryType::Output => {
+                            items.push(ListItem::new(Line::from(Span::styled(line, output_fg))));
                         }
-                    }
-                    EntryType::System => {
-                        for line in &entry.content {
-                            items.push(ListItem::new(Line::from(Span::raw(line))).style(gray));
+                        EntryType::System => {
+                            items.push(ListItem::new(Line::from(Span::styled(line, gray))));
                         }
                     }
                 }
             }
+
+            current_line = entry_end;
+
+            if current_line >= end_line {
+                break;
+            }
         }
 
-        let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).border_style(red))
-            .style(black);
-
+        let list = List::new(items).style(output_bg);
         f.render_widget(list, list_area);
 
-        let cwd = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "~".to_string());
-        let prompt_len = cwd.len() + 4;
-        let input_with_prompt = format!(
-            "\x1b[1;31m{}\x1b[0m\x1b[90m $\x1b[0m {}",
-            cwd, app.current_input
-        );
-        let input_widget = Paragraph::new(input_with_prompt.as_str())
-            .block(Block::default().borders(Borders::ALL).border_style(red))
-            .style(white);
+        let input_with_prompt = format!("$ {}", app.current_input);
+        let input_widget = Paragraph::new(input_with_prompt.as_str()).style(input_prompt_fg);
         f.render_widget(input_widget, input_area);
 
-        let cursor_x = (prompt_len + app.cursor_position) as u16;
+        let cursor_x = (2 + app.cursor_position) as u16;
         f.set_cursor_position(ratatui::layout::Position {
             x: cursor_x.min(input_area.width.saturating_sub(1)),
             y: input_area.y + 1,
@@ -339,20 +341,13 @@ fn render(
                     }
                 })
                 .collect();
-            let suggestions_list = List::new(suggestions_items)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(gray)
-                        .title("Completions"),
-                )
-                .style(gray);
+            let suggestions_list = List::new(suggestions_items).style(gray);
 
             let suggestions_area = Rect {
-                x: prompt_len as u16,
-                y: input_area.y.saturating_sub(suggestions_height + 1),
-                width: 30.min(input_area.width - prompt_len as u16),
-                height: suggestions_height + 2,
+                x: 2,
+                y: input_area.y.saturating_sub(suggestions_height),
+                width: 30.min(input_area.width - 2),
+                height: suggestions_height,
             };
             f.render_widget(suggestions_list, suggestions_area);
         }
@@ -369,11 +364,15 @@ fn main() -> std::io::Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    app.add_system(vec![
-        "Welcome to nsh - AI-Powered Shell".to_string(),
-        "Type 'help' for commands".to_string(),
-        "Use Tab for autocomplete, Up/Down for history".to_string(),
-    ]);
+    app.add_entry(Entry {
+        entry_type: EntryType::System,
+        content: vec![
+            "Welcome to nsh - AI-Powered Shell".to_string(),
+            "Type 'help' for commands".to_string(),
+            "Use Tab for autocomplete, Up/Down for history".to_string(),
+        ],
+        cwd: "~".to_string(),
+    });
 
     let mut running = true;
 
@@ -393,7 +392,11 @@ fn main() -> std::io::Result<()> {
                 KeyCode::Char(c) => {
                     if key.modifiers.contains(event::KeyModifiers::CONTROL) {
                         if c == 'c' {
-                            app.add_command("^C".to_string(), cwd.clone());
+                            app.add_entry(Entry {
+                                entry_type: EntryType::Command,
+                                content: vec!["^C".to_string()],
+                                cwd: cwd.clone(),
+                            });
                             app.current_input.clear();
                             app.cursor_position = 0;
                             app.history_index = None;
@@ -440,13 +443,22 @@ fn main() -> std::io::Result<()> {
                     if input == "exit" || input == "quit" {
                         running = false;
                     } else if !input.is_empty() {
-                        app.add_command(input.clone(), cwd.clone());
+                        app.add_entry(Entry {
+                            entry_type: EntryType::Command,
+                            content: vec![input.clone()],
+                            cwd: cwd.clone(),
+                        });
+
                         let output = execute_command(&input);
 
                         if output.iter().any(|s| s == "__CLEAR__") {
                             app.clear();
-                        } else {
-                            app.add_output(output);
+                        } else if !output.is_empty() {
+                            app.add_entry(Entry {
+                                entry_type: EntryType::Output,
+                                content: output,
+                                cwd: String::new(),
+                            });
                         }
                     }
 
@@ -456,7 +468,6 @@ fn main() -> std::io::Result<()> {
                     app.history_index = None;
                     app.show_suggestions = false;
                     app.current_suggestions.clear();
-                    app.scroll_to_bottom();
                 }
                 KeyCode::Tab => {
                     if !app.current_suggestions.is_empty() {
@@ -529,8 +540,8 @@ fn main() -> std::io::Result<()> {
                     app.scroll_offset = app.scroll_offset.saturating_sub(10);
                 }
                 KeyCode::PageDown => {
-                    let max_scroll = app.entries.len().saturating_sub(1);
-                    app.scroll_offset = (app.scroll_offset + 10).min(max_scroll);
+                    app.scroll_offset =
+                        (app.scroll_offset + 10).min(app.total_lines.saturating_sub(1));
                 }
                 KeyCode::Home => {
                     app.scroll_offset = 0;
