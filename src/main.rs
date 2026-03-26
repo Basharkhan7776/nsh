@@ -1,5 +1,7 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -117,22 +119,40 @@ impl App {
         let input_lower = self.current_input.to_lowercase();
         let mut suggestions: Vec<String> = Vec::new();
 
-        for cmd in PATH_COMMANDS.iter() {
-            if cmd.to_lowercase().starts_with(&input_lower) {
-                suggestions.push(cmd.clone());
-            }
-        }
-
-        for entry in self.entries.iter().rev() {
-            if entry.entry_type == EntryType::Command {
-                if let Some(cmd) = entry.content.first() {
-                    if cmd.to_lowercase().starts_with(&input_lower) && !suggestions.contains(cmd) {
-                        suggestions.push(cmd.clone());
+        if self.current_input.starts_with("cd ") {
+            let dir_part = self.current_input[3..].trim();
+            if let Ok(entries) = std::fs::read_dir(".") {
+                for entry in entries.flatten() {
+                    if let Ok(name) = entry.file_name().into_string() {
+                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                        let name_lower = name.to_lowercase();
+                        if name_lower.starts_with(&dir_part.to_lowercase()) || dir_part.is_empty() {
+                            let prefix = if is_dir { "" } else { "" };
+                            suggestions.push(format!("{}{}", prefix, name));
+                        }
                     }
                 }
             }
-            if suggestions.len() >= 10 {
-                break;
+        } else {
+            for cmd in PATH_COMMANDS.iter() {
+                if cmd.to_lowercase().starts_with(&input_lower) {
+                    suggestions.push(cmd.clone());
+                }
+            }
+
+            for entry in self.entries.iter().rev() {
+                if entry.entry_type == EntryType::Command {
+                    if let Some(cmd) = entry.content.first() {
+                        if cmd.to_lowercase().starts_with(&input_lower)
+                            && !suggestions.contains(cmd)
+                        {
+                            suggestions.push(cmd.clone());
+                        }
+                    }
+                }
+                if suggestions.len() >= 10 {
+                    break;
+                }
             }
         }
 
@@ -236,11 +256,7 @@ fn render(
         let output_bg = Style::default().bg(Color::Black);
         let output_fg = Style::default().fg(Color::White).bg(Color::Black);
         let prompt_fg = Style::default().fg(Color::Green).bg(Color::Black);
-
-        let input_bg = Style::default().bg(Color::Rgb(30, 30, 30));
-        let input_fg = Style::default().fg(Color::White).bg(Color::Rgb(30, 30, 30));
         let input_prompt_fg = Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30));
-
         let gray = Style::default()
             .fg(Color::DarkGray)
             .bg(Color::Rgb(30, 30, 30));
@@ -255,7 +271,6 @@ fn render(
 
         let visible_height = list_area.height as usize;
         let content_height = app.entries.iter().map(|e| e.content.len()).sum::<usize>();
-
         let start_line = app.scroll_offset;
         let end_line = (start_line + visible_height).min(content_height);
 
@@ -276,7 +291,6 @@ fn render(
             } else {
                 0
             };
-
             let show_from = current_line + skip;
             let show_to = entry_end.min(end_line);
 
@@ -305,7 +319,6 @@ fn render(
             }
 
             current_line = entry_end;
-
             if current_line >= end_line {
                 break;
             }
@@ -318,10 +331,11 @@ fn render(
         let input_widget = Paragraph::new(input_with_prompt.as_str()).style(input_prompt_fg);
         f.render_widget(input_widget, input_area);
 
-        let cursor_x = (2 + app.cursor_position) as u16;
+        let cursor_x = (1 + app.cursor_position) as u16;
+        let cursor_y = input_area.y + 1;
         f.set_cursor_position(ratatui::layout::Position {
             x: cursor_x.min(input_area.width.saturating_sub(1)),
-            y: input_area.y + 1,
+            y: cursor_y,
         });
 
         if app.show_suggestions && !app.current_suggestions.is_empty() {
@@ -342,7 +356,6 @@ fn render(
                 })
                 .collect();
             let suggestions_list = List::new(suggestions_items).style(gray);
-
             let suggestions_area = Rect {
                 x: 2,
                 y: input_area.y.saturating_sub(suggestions_height),
@@ -379,181 +392,213 @@ fn main() -> std::io::Result<()> {
     while running {
         render(&mut terminal, &app)?;
 
-        if let Event::Key(key) = event::read()? {
-            if key.kind != KeyEventKind::Press {
-                continue;
-            }
+        loop {
+            match event::poll(std::time::Duration::from_millis(50)) {
+                Ok(true) => {
+                    if let Ok(event) = event::read() {
+                        match event {
+                            Event::Key(key) => {
+                                if key.kind != KeyEventKind::Press {
+                                    continue;
+                                }
+                                let cwd = std::env::current_dir()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| "~".to_string());
 
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "~".to_string());
-
-            match key.code {
-                KeyCode::Char(c) => {
-                    if key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                        if c == 'c' {
-                            app.add_entry(Entry {
-                                entry_type: EntryType::Command,
-                                content: vec!["^C".to_string()],
-                                cwd: cwd.clone(),
-                            });
-                            app.current_input.clear();
-                            app.cursor_position = 0;
-                            app.history_index = None;
-                            app.show_suggestions = false;
-                        } else if c == 'd' {
-                            if app.current_input.is_empty() {
-                                running = false;
+                                match key.code {
+                                    KeyCode::Char(c) => {
+                                        if key.modifiers.contains(event::KeyModifiers::CONTROL) {
+                                            if c == 'c' {
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Command,
+                                                    content: vec!["^C".to_string()],
+                                                    cwd: cwd.clone(),
+                                                });
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.history_index = None;
+                                                app.show_suggestions = false;
+                                            } else if c == 'd' {
+                                                if app.current_input.is_empty() {
+                                                    running = false;
+                                                }
+                                            }
+                                        } else {
+                                            app.current_input.insert(app.cursor_position, c);
+                                            app.cursor_position += 1;
+                                            app.history_index = None;
+                                            app.update_suggestions();
+                                        }
+                                    }
+                                    KeyCode::Backspace => {
+                                        if app.cursor_position > 0 {
+                                            app.cursor_position -= 1;
+                                            app.current_input.remove(app.cursor_position);
+                                            app.history_index = None;
+                                            app.update_suggestions();
+                                        }
+                                    }
+                                    KeyCode::Delete => {
+                                        if app.cursor_position < app.current_input.len() {
+                                            app.current_input.remove(app.cursor_position);
+                                            app.update_suggestions();
+                                        }
+                                    }
+                                    KeyCode::Left => {
+                                        if app.cursor_position > 0 {
+                                            app.cursor_position -= 1;
+                                        }
+                                    }
+                                    KeyCode::Right => {
+                                        if app.cursor_position < app.current_input.len() {
+                                            app.cursor_position += 1;
+                                        }
+                                    }
+                                    KeyCode::Enter => {
+                                        let input = app.current_input.clone();
+                                        if input == "exit" || input == "quit" {
+                                            running = false;
+                                        } else if !input.is_empty() {
+                                            app.add_entry(Entry {
+                                                entry_type: EntryType::Command,
+                                                content: vec![input.clone()],
+                                                cwd: cwd.clone(),
+                                            });
+                                            let output = execute_command(&input);
+                                            if output.iter().any(|s| s == "__CLEAR__") {
+                                                app.clear();
+                                            } else if !output.is_empty() {
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Output,
+                                                    content: output,
+                                                    cwd: String::new(),
+                                                });
+                                            }
+                                        }
+                                        app.current_input.clear();
+                                        app.cursor_position = 0;
+                                        app.saved_input.clear();
+                                        app.history_index = None;
+                                        app.show_suggestions = false;
+                                        app.current_suggestions.clear();
+                                    }
+                                    KeyCode::Tab => {
+                                        if !app.current_suggestions.is_empty() {
+                                            if let Some(s) =
+                                                app.current_suggestions.get(app.selected_suggestion)
+                                            {
+                                                if app.current_input.starts_with("cd ") {
+                                                    app.current_input = format!("cd {}", s);
+                                                } else {
+                                                    app.current_input = s.clone();
+                                                }
+                                                app.cursor_position = app.current_input.len();
+                                            }
+                                            app.show_suggestions = false;
+                                            app.current_suggestions.clear();
+                                        } else if !app.current_input.is_empty() {
+                                            app.update_suggestions();
+                                            if app.current_suggestions.len() == 1 {
+                                                if app.current_input.starts_with("cd ") {
+                                                    app.current_input = format!(
+                                                        "cd {}",
+                                                        app.current_suggestions[0]
+                                                    );
+                                                } else {
+                                                    app.current_input =
+                                                        app.current_suggestions[0].clone();
+                                                }
+                                                app.cursor_position = app.current_input.len();
+                                                app.show_suggestions = false;
+                                                app.current_suggestions.clear();
+                                            }
+                                        }
+                                    }
+                                    KeyCode::Up => {
+                                        if app.show_suggestions
+                                            && !app.current_suggestions.is_empty()
+                                        {
+                                            app.selected_suggestion =
+                                                app.selected_suggestion.saturating_sub(1);
+                                        } else {
+                                            let commands = app.get_history_commands();
+                                            if commands.is_empty() {
+                                                break;
+                                            }
+                                            if app.history_index.is_none() {
+                                                app.saved_input = app.current_input.clone();
+                                                app.history_index = Some(commands.len() - 1);
+                                            } else if let Some(idx) = app.history_index {
+                                                if idx > 0 {
+                                                    app.history_index = Some(idx - 1);
+                                                }
+                                            }
+                                            if let Some(idx) = app.history_index {
+                                                if let Some(cmd) = commands.get(idx) {
+                                                    app.current_input = cmd.clone();
+                                                    app.cursor_position = app.current_input.len();
+                                                }
+                                            }
+                                            app.show_suggestions = false;
+                                        }
+                                    }
+                                    KeyCode::Down => {
+                                        if app.show_suggestions
+                                            && !app.current_suggestions.is_empty()
+                                        {
+                                            app.selected_suggestion = (app.selected_suggestion + 1)
+                                                % app.current_suggestions.len();
+                                        } else if let Some(idx) = app.history_index {
+                                            let commands = app.get_history_commands();
+                                            if idx < commands.len() - 1 {
+                                                app.history_index = Some(idx + 1);
+                                                if let Some(cmd) = commands.get(idx + 1) {
+                                                    app.current_input = cmd.clone();
+                                                    app.cursor_position = app.current_input.len();
+                                                }
+                                            } else {
+                                                app.current_input = app.saved_input.clone();
+                                                app.cursor_position = app.current_input.len();
+                                                app.history_index = None;
+                                            }
+                                            app.show_suggestions = false;
+                                        }
+                                    }
+                                    KeyCode::PageUp => {
+                                        app.scroll_offset = app.scroll_offset.saturating_sub(5)
+                                    }
+                                    KeyCode::PageDown => {
+                                        app.scroll_offset = (app.scroll_offset + 5)
+                                            .min(app.total_lines.saturating_sub(1))
+                                    }
+                                    KeyCode::Home => app.scroll_offset = 0,
+                                    KeyCode::End => app.scroll_to_bottom(),
+                                    KeyCode::Esc => {
+                                        app.show_suggestions = false;
+                                        app.current_suggestions.clear();
+                                    }
+                                    _ => {}
+                                }
+                                break;
+                            }
+                            Event::Mouse(mouse) => {
+                                if mouse.kind == MouseEventKind::ScrollUp {
+                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                } else if mouse.kind == MouseEventKind::ScrollDown {
+                                    app.scroll_offset = (app.scroll_offset + 3)
+                                        .min(app.total_lines.saturating_sub(1));
+                                }
+                                break;
+                            }
+                            _ => {
+                                break;
                             }
                         }
-                    } else {
-                        app.current_input.insert(app.cursor_position, c);
-                        app.cursor_position += 1;
-                        app.history_index = None;
-                        app.update_suggestions();
                     }
                 }
-                KeyCode::Backspace => {
-                    if app.cursor_position > 0 {
-                        app.cursor_position -= 1;
-                        app.current_input.remove(app.cursor_position);
-                        app.history_index = None;
-                        app.update_suggestions();
-                    }
+                Ok(false) | Err(_) => {
+                    break;
                 }
-                KeyCode::Delete => {
-                    if app.cursor_position < app.current_input.len() {
-                        app.current_input.remove(app.cursor_position);
-                        app.update_suggestions();
-                    }
-                }
-                KeyCode::Left => {
-                    if app.cursor_position > 0 {
-                        app.cursor_position -= 1;
-                    }
-                }
-                KeyCode::Right => {
-                    if app.cursor_position < app.current_input.len() {
-                        app.cursor_position += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    let input = app.current_input.clone();
-
-                    if input == "exit" || input == "quit" {
-                        running = false;
-                    } else if !input.is_empty() {
-                        app.add_entry(Entry {
-                            entry_type: EntryType::Command,
-                            content: vec![input.clone()],
-                            cwd: cwd.clone(),
-                        });
-
-                        let output = execute_command(&input);
-
-                        if output.iter().any(|s| s == "__CLEAR__") {
-                            app.clear();
-                        } else if !output.is_empty() {
-                            app.add_entry(Entry {
-                                entry_type: EntryType::Output,
-                                content: output,
-                                cwd: String::new(),
-                            });
-                        }
-                    }
-
-                    app.current_input.clear();
-                    app.cursor_position = 0;
-                    app.saved_input.clear();
-                    app.history_index = None;
-                    app.show_suggestions = false;
-                    app.current_suggestions.clear();
-                }
-                KeyCode::Tab => {
-                    if !app.current_suggestions.is_empty() {
-                        if let Some(suggestion) =
-                            app.current_suggestions.get(app.selected_suggestion)
-                        {
-                            app.current_input = suggestion.clone();
-                            app.cursor_position = app.current_input.len();
-                        }
-                        app.show_suggestions = false;
-                        app.current_suggestions.clear();
-                    } else if !app.current_input.is_empty() {
-                        app.update_suggestions();
-                        if app.current_suggestions.len() == 1 {
-                            app.current_input = app.current_suggestions[0].clone();
-                            app.cursor_position = app.current_input.len();
-                            app.show_suggestions = false;
-                            app.current_suggestions.clear();
-                        }
-                    }
-                }
-                KeyCode::Up => {
-                    if app.show_suggestions && !app.current_suggestions.is_empty() {
-                        app.selected_suggestion = app.selected_suggestion.saturating_sub(1);
-                    } else {
-                        let commands = app.get_history_commands();
-                        if commands.is_empty() {
-                            continue;
-                        }
-
-                        if app.history_index.is_none() {
-                            app.saved_input = app.current_input.clone();
-                            app.history_index = Some(commands.len() - 1);
-                        } else if let Some(idx) = app.history_index {
-                            if idx > 0 {
-                                app.history_index = Some(idx - 1);
-                            }
-                        }
-
-                        if let Some(idx) = app.history_index {
-                            if let Some(cmd) = commands.get(idx) {
-                                app.current_input = cmd.clone();
-                                app.cursor_position = app.current_input.len();
-                            }
-                        }
-                        app.show_suggestions = false;
-                    }
-                }
-                KeyCode::Down => {
-                    if app.show_suggestions && !app.current_suggestions.is_empty() {
-                        app.selected_suggestion =
-                            (app.selected_suggestion + 1) % app.current_suggestions.len();
-                    } else if let Some(idx) = app.history_index {
-                        let commands = app.get_history_commands();
-                        if idx < commands.len() - 1 {
-                            app.history_index = Some(idx + 1);
-                            if let Some(cmd) = commands.get(idx + 1) {
-                                app.current_input = cmd.clone();
-                                app.cursor_position = app.current_input.len();
-                            }
-                        } else {
-                            app.current_input = app.saved_input.clone();
-                            app.cursor_position = app.current_input.len();
-                            app.history_index = None;
-                        }
-                        app.show_suggestions = false;
-                    }
-                }
-                KeyCode::PageUp => {
-                    app.scroll_offset = app.scroll_offset.saturating_sub(10);
-                }
-                KeyCode::PageDown => {
-                    app.scroll_offset =
-                        (app.scroll_offset + 10).min(app.total_lines.saturating_sub(1));
-                }
-                KeyCode::Home => {
-                    app.scroll_offset = 0;
-                }
-                KeyCode::End => {
-                    app.scroll_to_bottom();
-                }
-                KeyCode::Esc => {
-                    app.show_suggestions = false;
-                    app.current_suggestions.clear();
-                }
-                _ => {}
             }
         }
     }
@@ -565,6 +610,5 @@ fn main() -> std::io::Result<()> {
         DisableMouseCapture
     )?;
     println!("\nGoodbye!");
-
     Ok(())
 }
