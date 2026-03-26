@@ -33,6 +33,8 @@ static PATH_COMMANDS: LazyLock<Vec<String>> = LazyLock::new(|| {
         .collect()
 });
 
+const MAX_VISIBLE_SUGGESTIONS: usize = 7;
+
 #[derive(Clone)]
 struct Entry {
     entry_type: EntryType,
@@ -56,6 +58,7 @@ struct App {
     current_suggestions: Vec<String>,
     show_suggestions: bool,
     selected_suggestion: usize,
+    suggestion_scroll_offset: usize,
     saved_input: String,
     history_index: Option<usize>,
 }
@@ -71,6 +74,7 @@ impl App {
             current_suggestions: Vec::new(),
             show_suggestions: false,
             selected_suggestion: 0,
+            suggestion_scroll_offset: 0,
             saved_input: String::new(),
             history_index: None,
         }
@@ -109,10 +113,25 @@ impl App {
             .collect()
     }
 
+    fn visible_suggestions(&self) -> Vec<String> {
+        let start = self.suggestion_scroll_offset;
+        let end = (start + MAX_VISIBLE_SUGGESTIONS).min(self.current_suggestions.len());
+        if start >= self.current_suggestions.len() {
+            return vec![];
+        }
+        self.current_suggestions[start..end].to_vec()
+    }
+
+    fn has_more_suggestions(&self) -> bool {
+        self.suggestion_scroll_offset + MAX_VISIBLE_SUGGESTIONS < self.current_suggestions.len()
+    }
+
     fn update_suggestions(&mut self) {
         if self.current_input.is_empty() {
             self.current_suggestions.clear();
             self.show_suggestions = false;
+            self.selected_suggestion = 0;
+            self.suggestion_scroll_offset = 0;
             return;
         }
 
@@ -125,14 +144,18 @@ impl App {
                 for entry in entries.flatten() {
                     if let Ok(name) = entry.file_name().into_string() {
                         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        let name_lower = name.to_lowercase();
-                        if name_lower.starts_with(&dir_part.to_lowercase()) || dir_part.is_empty() {
-                            let prefix = if is_dir { "" } else { "" };
-                            suggestions.push(format!("{}{}", prefix, name));
+                        if is_dir {
+                            let name_lower = name.to_lowercase();
+                            if name_lower.starts_with(&dir_part.to_lowercase())
+                                || dir_part.is_empty()
+                            {
+                                suggestions.push(name);
+                            }
                         }
                     }
                 }
             }
+            suggestions.sort();
         } else {
             for cmd in PATH_COMMANDS.iter() {
                 if cmd.to_lowercase().starts_with(&input_lower) {
@@ -150,7 +173,7 @@ impl App {
                         }
                     }
                 }
-                if suggestions.len() >= 10 {
+                if suggestions.len() >= 20 {
                     break;
                 }
             }
@@ -158,6 +181,28 @@ impl App {
 
         self.current_suggestions = suggestions;
         self.show_suggestions = !self.current_suggestions.is_empty();
+        self.selected_suggestion = 0;
+        self.suggestion_scroll_offset = 0;
+    }
+
+    fn suggestion_page_up(&mut self) {
+        if self.suggestion_scroll_offset > 0 {
+            self.suggestion_scroll_offset = self
+                .suggestion_scroll_offset
+                .saturating_sub(MAX_VISIBLE_SUGGESTIONS);
+            self.selected_suggestion = 0;
+        }
+    }
+
+    fn suggestion_page_down(&mut self) {
+        let max_scroll = self
+            .current_suggestions
+            .len()
+            .saturating_sub(MAX_VISIBLE_SUGGESTIONS);
+        self.suggestion_scroll_offset = self
+            .suggestion_scroll_offset
+            .saturating_add(MAX_VISIBLE_SUGGESTIONS)
+            .min(max_scroll);
         self.selected_suggestion = 0;
     }
 }
@@ -339,13 +384,23 @@ fn render(
         });
 
         if app.show_suggestions && !app.current_suggestions.is_empty() {
-            let suggestions_height = app.current_suggestions.len() as u16;
-            let suggestions_items: Vec<ListItem> = app
-                .current_suggestions
+            let visible = app.visible_suggestions();
+            let _total_suggestions = app.current_suggestions.len();
+            let has_more = app.has_more_suggestions();
+
+            let display_height = if has_more {
+                MAX_VISIBLE_SUGGESTIONS + 1
+            } else {
+                visible.len().min(MAX_VISIBLE_SUGGESTIONS)
+            };
+            let display_height = display_height as u16;
+
+            let mut suggestions_items: Vec<ListItem> = visible
                 .iter()
                 .enumerate()
                 .map(|(i, s)| {
-                    if i == app.selected_suggestion {
+                    let global_idx = app.suggestion_scroll_offset + i;
+                    if global_idx == app.selected_suggestion {
                         ListItem::new(Line::from(Span::styled(
                             s,
                             Style::default().bg(Color::Blue).fg(Color::White),
@@ -355,12 +410,21 @@ fn render(
                     }
                 })
                 .collect();
+
+            if has_more {
+                let more_item = ListItem::new(Line::from(Span::styled(
+                    "...",
+                    Style::default().fg(Color::DarkGray),
+                )));
+                suggestions_items.push(more_item);
+            }
+
             let suggestions_list = List::new(suggestions_items).style(gray);
             let suggestions_area = Rect {
                 x: 2,
-                y: input_area.y.saturating_sub(suggestions_height),
-                width: 30.min(input_area.width - 2),
-                height: suggestions_height,
+                y: input_area.y.saturating_sub(display_height as u16),
+                width: 40.min(input_area.width - 2),
+                height: display_height,
             };
             f.render_widget(suggestions_list, suggestions_area);
         }
@@ -421,6 +485,12 @@ fn main() -> std::io::Result<()> {
                                             } else if c == 'd' {
                                                 if app.current_input.is_empty() {
                                                     running = false;
+                                                }
+                                            } else if c == 'p' {
+                                                if app.show_suggestions
+                                                    && app.has_more_suggestions()
+                                                {
+                                                    app.suggestion_page_down();
                                                 }
                                             }
                                         } else {
@@ -518,8 +588,28 @@ fn main() -> std::io::Result<()> {
                                         if app.show_suggestions
                                             && !app.current_suggestions.is_empty()
                                         {
-                                            app.selected_suggestion =
-                                                app.selected_suggestion.saturating_sub(1);
+                                            if app.selected_suggestion > 0 {
+                                                app.selected_suggestion -= 1;
+                                            } else {
+                                                app.selected_suggestion =
+                                                    app.current_suggestions.len() - 1;
+                                            }
+
+                                            if app.selected_suggestion
+                                                >= app.suggestion_scroll_offset
+                                                    + MAX_VISIBLE_SUGGESTIONS
+                                            {
+                                                app.suggestion_scroll_offset = app
+                                                    .selected_suggestion
+                                                    .saturating_sub(MAX_VISIBLE_SUGGESTIONS - 1);
+                                            }
+                                            if app.selected_suggestion
+                                                < app.suggestion_scroll_offset
+                                            {
+                                                app.suggestion_scroll_offset = app
+                                                    .selected_suggestion
+                                                    .saturating_sub(MAX_VISIBLE_SUGGESTIONS / 2);
+                                            }
                                         } else {
                                             let commands = app.get_history_commands();
                                             if commands.is_empty() {
@@ -548,6 +638,23 @@ fn main() -> std::io::Result<()> {
                                         {
                                             app.selected_suggestion = (app.selected_suggestion + 1)
                                                 % app.current_suggestions.len();
+
+                                            if app.selected_suggestion
+                                                >= app.suggestion_scroll_offset
+                                                    + MAX_VISIBLE_SUGGESTIONS
+                                                && app.has_more_suggestions()
+                                            {
+                                                app.suggestion_scroll_offset = (app
+                                                    .suggestion_scroll_offset
+                                                    + MAX_VISIBLE_SUGGESTIONS)
+                                                    .min(
+                                                        app.current_suggestions
+                                                            .len()
+                                                            .saturating_sub(
+                                                                MAX_VISIBLE_SUGGESTIONS,
+                                                            ),
+                                                    );
+                                            }
                                         } else if let Some(idx) = app.history_index {
                                             let commands = app.get_history_commands();
                                             if idx < commands.len() - 1 {
@@ -565,11 +672,21 @@ fn main() -> std::io::Result<()> {
                                         }
                                     }
                                     KeyCode::PageUp => {
-                                        app.scroll_offset = app.scroll_offset.saturating_sub(5)
+                                        if app.show_suggestions && app.has_more_suggestions() {
+                                            app.suggestion_page_up();
+                                            app.selected_suggestion = app.suggestion_scroll_offset;
+                                        } else {
+                                            app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                                        }
                                     }
                                     KeyCode::PageDown => {
-                                        app.scroll_offset = (app.scroll_offset + 5)
-                                            .min(app.total_lines.saturating_sub(1))
+                                        if app.show_suggestions && app.has_more_suggestions() {
+                                            app.suggestion_page_down();
+                                            app.selected_suggestion = app.suggestion_scroll_offset;
+                                        } else {
+                                            app.scroll_offset = (app.scroll_offset + 5)
+                                                .min(app.total_lines.saturating_sub(1));
+                                        }
                                     }
                                     KeyCode::Home => app.scroll_offset = 0,
                                     KeyCode::End => app.scroll_to_bottom(),
@@ -583,10 +700,18 @@ fn main() -> std::io::Result<()> {
                             }
                             Event::Mouse(mouse) => {
                                 if mouse.kind == MouseEventKind::ScrollUp {
-                                    app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                    if app.show_suggestions && app.has_more_suggestions() {
+                                        app.suggestion_page_up();
+                                    } else {
+                                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                    }
                                 } else if mouse.kind == MouseEventKind::ScrollDown {
-                                    app.scroll_offset = (app.scroll_offset + 3)
-                                        .min(app.total_lines.saturating_sub(1));
+                                    if app.show_suggestions && app.has_more_suggestions() {
+                                        app.suggestion_page_down();
+                                    } else {
+                                        app.scroll_offset = (app.scroll_offset + 3)
+                                            .min(app.total_lines.saturating_sub(1));
+                                    }
                                 }
                                 break;
                             }
