@@ -293,6 +293,19 @@ fn execute_command(input: &str) -> Vec<String> {
     }
 }
 
+fn shorten_cwd(cwd: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        if cwd.starts_with(&home) {
+            let remainder = &cwd[home.len()..];
+            if remainder.is_empty() {
+                return "~".to_string();
+            }
+            return format!("~{}", remainder);
+        }
+    }
+    cwd.to_string()
+}
+
 fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &App,
@@ -300,7 +313,7 @@ fn render(
     terminal.draw(|f| {
         let output_bg = Style::default().bg(Color::Black);
         let output_fg = Style::default().fg(Color::White).bg(Color::Black);
-        let prompt_fg = Style::default().fg(Color::Green).bg(Color::Black);
+        let _prompt_fg = Style::default().fg(Color::Green).bg(Color::Black);
         let input_prompt_fg = Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30));
         let gray = Style::default()
             .fg(Color::DarkGray)
@@ -346,10 +359,20 @@ fn render(
                         EntryType::Command => {
                             if let Some(cmd) = entry.content.first() {
                                 if i == current_line {
-                                    let display = format!("{} $ {}", entry.cwd, cmd);
-                                    items.push(ListItem::new(Line::from(Span::styled(
-                                        display, prompt_fg,
-                                    ))));
+                                    let cwd_display = shorten_cwd(&entry.cwd);
+                                    let cmd_display = format!("$ {}", cmd);
+
+                                    let line = Line::from(vec![
+                                        Span::styled(
+                                            cwd_display,
+                                            Style::default().fg(Color::Green).bg(Color::Black),
+                                        ),
+                                        Span::styled(
+                                            cmd_display,
+                                            Style::default().fg(Color::DarkGray).bg(Color::Black),
+                                        ),
+                                    ]);
+                                    items.push(ListItem::new(line));
                                 }
                             }
                         }
@@ -372,16 +395,20 @@ fn render(
         let list = List::new(items).style(output_bg);
         f.render_widget(list, list_area);
 
-        let input_with_prompt = format!("$ {}", app.current_input);
-        let input_widget = Paragraph::new(input_with_prompt.as_str()).style(input_prompt_fg);
+        let prompt_text = " $ ";
+        let input_with_cursor = if app.current_input.is_empty() {
+            format!("{}|", prompt_text)
+        } else if app.cursor_position == 0 {
+            format!("{}|{}", prompt_text, app.current_input)
+        } else if app.cursor_position >= app.current_input.len() {
+            format!("{}{}|", prompt_text, app.current_input)
+        } else {
+            let before_cursor = &app.current_input[..app.cursor_position];
+            let after_cursor = &app.current_input[app.cursor_position..];
+            format!("{}{}|{}", prompt_text, before_cursor, after_cursor)
+        };
+        let input_widget = Paragraph::new(input_with_cursor.as_str()).style(input_prompt_fg);
         f.render_widget(input_widget, input_area);
-
-        let cursor_x = (1 + app.cursor_position) as u16;
-        let cursor_y = input_area.y + 1;
-        f.set_cursor_position(ratatui::layout::Position {
-            x: cursor_x.min(input_area.width.saturating_sub(1)),
-            y: cursor_y,
-        });
 
         if app.show_suggestions && !app.current_suggestions.is_empty() {
             let visible = app.visible_suggestions();
