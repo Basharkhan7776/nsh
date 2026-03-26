@@ -1,3 +1,6 @@
+// NSH Shell - Binary Entry Point
+// Terminal-based shell with TUI, autocompletion, and command history
+
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
@@ -5,461 +8,11 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{
-    backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::{List, ListItem, Paragraph},
-    Terminal,
-};
-use std::sync::LazyLock;
-
-static PATH_COMMANDS: LazyLock<Vec<String>> = LazyLock::new(|| {
-    std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .filter_map(|dir| {
-            std::fs::read_dir(dir).ok().map(|d| {
-                d.filter_map(|e| e.ok())
-                    .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
-                    .filter_map(|e| e.file_name().into_string().ok())
-                    .collect::<Vec<_>>()
-            })
-        })
-        .flatten()
-        .collect::<std::collections::HashSet<_>>()
-        .into_iter()
-        .collect()
-});
-
-const MAX_VISIBLE_SUGGESTIONS: usize = 7;
-
-#[derive(Clone)]
-struct Entry {
-    entry_type: EntryType,
-    content: Vec<String>,
-    cwd: String,
-}
-
-#[derive(Clone, PartialEq)]
-enum EntryType {
-    Command,
-    Output,
-    System,
-}
-
-struct App {
-    entries: Vec<Entry>,
-    current_input: String,
-    cursor_position: usize,
-    scroll_offset: usize,
-    total_lines: usize,
-    current_suggestions: Vec<String>,
-    show_suggestions: bool,
-    selected_suggestion: usize,
-    suggestion_scroll_offset: usize,
-    saved_input: String,
-    history_index: Option<usize>,
-}
-
-impl App {
-    fn new() -> Self {
-        Self {
-            entries: Vec::new(),
-            current_input: String::new(),
-            cursor_position: 0,
-            scroll_offset: 0,
-            total_lines: 0,
-            current_suggestions: Vec::new(),
-            show_suggestions: false,
-            selected_suggestion: 0,
-            suggestion_scroll_offset: 0,
-            saved_input: String::new(),
-            history_index: None,
-        }
-    }
-
-    fn add_entry(&mut self, entry: Entry) {
-        self.entries.push(entry);
-        self.recalc_total_lines();
-        self.scroll_to_bottom();
-    }
-
-    fn recalc_total_lines(&mut self) {
-        self.total_lines = self.entries.iter().map(|e| e.content.len()).sum();
-    }
-
-    fn clear(&mut self) {
-        self.entries.clear();
-        self.total_lines = 0;
-        self.scroll_offset = 0;
-    }
-
-    fn scroll_to_bottom(&mut self) {
-        let visible = self.visible_count();
-        self.scroll_offset = self.total_lines.saturating_sub(visible);
-    }
-
-    fn visible_count(&self) -> usize {
-        20
-    }
-
-    fn get_history_commands(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter(|e| e.entry_type == EntryType::Command)
-            .filter_map(|e| e.content.first().cloned())
-            .collect()
-    }
-
-    fn visible_suggestions(&self) -> Vec<String> {
-        let start = self.suggestion_scroll_offset;
-        let end = (start + MAX_VISIBLE_SUGGESTIONS).min(self.current_suggestions.len());
-        if start >= self.current_suggestions.len() {
-            return vec![];
-        }
-        self.current_suggestions[start..end].to_vec()
-    }
-
-    fn has_more_suggestions(&self) -> bool {
-        self.suggestion_scroll_offset + MAX_VISIBLE_SUGGESTIONS < self.current_suggestions.len()
-    }
-
-    fn update_suggestions(&mut self) {
-        if self.current_input.is_empty() {
-            self.current_suggestions.clear();
-            self.show_suggestions = false;
-            self.selected_suggestion = 0;
-            self.suggestion_scroll_offset = 0;
-            return;
-        }
-
-        let input_lower = self.current_input.to_lowercase();
-        let mut suggestions: Vec<String> = Vec::new();
-
-        if self.current_input.starts_with("cd ") {
-            let dir_part = self.current_input[3..].trim();
-            if let Ok(entries) = std::fs::read_dir(".") {
-                for entry in entries.flatten() {
-                    if let Ok(name) = entry.file_name().into_string() {
-                        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                        if is_dir {
-                            let name_lower = name.to_lowercase();
-                            if name_lower.starts_with(&dir_part.to_lowercase())
-                                || dir_part.is_empty()
-                            {
-                                suggestions.push(name);
-                            }
-                        }
-                    }
-                }
-            }
-            suggestions.sort();
-        } else {
-            for cmd in PATH_COMMANDS.iter() {
-                if cmd.to_lowercase().starts_with(&input_lower) {
-                    suggestions.push(cmd.clone());
-                }
-            }
-
-            for entry in self.entries.iter().rev() {
-                if entry.entry_type == EntryType::Command {
-                    if let Some(cmd) = entry.content.first() {
-                        if cmd.to_lowercase().starts_with(&input_lower)
-                            && !suggestions.contains(cmd)
-                        {
-                            suggestions.push(cmd.clone());
-                        }
-                    }
-                }
-                if suggestions.len() >= 20 {
-                    break;
-                }
-            }
-        }
-
-        self.current_suggestions = suggestions;
-        self.show_suggestions = !self.current_suggestions.is_empty();
-        self.selected_suggestion = 0;
-        self.suggestion_scroll_offset = 0;
-    }
-
-    fn suggestion_page_up(&mut self) {
-        if self.suggestion_scroll_offset > 0 {
-            self.suggestion_scroll_offset = self
-                .suggestion_scroll_offset
-                .saturating_sub(MAX_VISIBLE_SUGGESTIONS);
-            self.selected_suggestion = 0;
-        }
-    }
-
-    fn suggestion_page_down(&mut self) {
-        let max_scroll = self
-            .current_suggestions
-            .len()
-            .saturating_sub(MAX_VISIBLE_SUGGESTIONS);
-        self.suggestion_scroll_offset = self
-            .suggestion_scroll_offset
-            .saturating_add(MAX_VISIBLE_SUGGESTIONS)
-            .min(max_scroll);
-        self.selected_suggestion = 0;
-    }
-}
-
-fn execute_command(input: &str) -> Vec<String> {
-    let input = input.trim();
-    if input.is_empty() {
-        return vec![];
-    }
-
-    let mut parts = input.split_whitespace();
-    let program = match parts.next() {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let args: Vec<&str> = parts.collect();
-
-    match program {
-        "exit" | "quit" => vec![],
-        "cd" => {
-            let target = if args.is_empty() {
-                std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
-            } else {
-                args[0].to_string()
-            };
-            if let Err(e) = std::env::set_current_dir(&target) {
-                return vec![format!("cd: {}: {}", target, e)];
-            }
-            vec![]
-        }
-        "clear" => return vec!["__CLEAR__".to_string()],
-        "help" => {
-            return vec![
-                "Available commands:".to_string(),
-                "  ask <question>  - Ask AI (future)".to_string(),
-                "  do <task>       - Execute task (future)".to_string(),
-                "  plan <goal>     - Plan goal (future)".to_string(),
-                "  build <project> - Build project (future)".to_string(),
-                "  cd <dir>        - Change directory".to_string(),
-                "  clear           - Clear screen".to_string(),
-                "  exit / quit     - Exit shell".to_string(),
-            ];
-        }
-        "ask" | "do" | "plan" | "build" => {
-            return vec![format!(
-                "{}: This feature will be implemented in a future update.",
-                program
-            )];
-        }
-        _ => {
-            use std::io::BufRead;
-            use std::io::BufReader;
-            use std::process::{Command, Stdio};
-
-            let child = Command::new(program)
-                .args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
-
-            match child {
-                Ok(mut child) => {
-                    let mut output = Vec::new();
-                    if let Some(stdout) = child.stdout.take() {
-                        let reader = BufReader::new(stdout);
-                        for line in reader.lines() {
-                            if let Ok(line) = line {
-                                output.push(line);
-                            }
-                        }
-                    }
-                    if let Some(stderr) = child.stderr.take() {
-                        let reader = BufReader::new(stderr);
-                        for line in reader.lines() {
-                            if let Ok(line) = line {
-                                output.push(line);
-                            }
-                        }
-                    }
-                    child.wait().ok();
-                    output
-                }
-                Err(_e) => {
-                    vec![format!("{}: command not found", program)]
-                }
-            }
-        }
-    }
-}
-
-fn shorten_cwd(cwd: &str) -> String {
-    if let Ok(home) = std::env::var("HOME") {
-        if cwd.starts_with(&home) {
-            let remainder = &cwd[home.len()..];
-            if remainder.is_empty() {
-                return "~".to_string();
-            }
-            return format!("~{}", remainder);
-        }
-    }
-    cwd.to_string()
-}
-
-fn render(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    app: &App,
-) -> std::io::Result<()> {
-    terminal.draw(|f| {
-        let output_bg = Style::default().bg(Color::Black);
-        let output_fg = Style::default().fg(Color::White).bg(Color::Black);
-        let _prompt_fg = Style::default().fg(Color::Green).bg(Color::Black);
-        let input_prompt_fg = Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30));
-        let gray = Style::default()
-            .fg(Color::DarkGray)
-            .bg(Color::Rgb(30, 30, 30));
-
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
-            .split(f.area());
-
-        let list_area = chunks[0];
-        let input_area = chunks[1];
-
-        let visible_height = list_area.height as usize;
-        let content_height = app.entries.iter().map(|e| e.content.len()).sum::<usize>();
-        let start_line = app.scroll_offset;
-        let end_line = (start_line + visible_height).min(content_height);
-
-        let mut current_line = 0;
-        let mut items: Vec<ListItem> = Vec::new();
-
-        for entry in &app.entries {
-            let entry_height = entry.content.len();
-            let entry_end = current_line + entry_height;
-
-            if entry_end <= start_line {
-                current_line = entry_end;
-                continue;
-            }
-
-            let skip = if current_line < start_line {
-                start_line - current_line
-            } else {
-                0
-            };
-            let show_from = current_line + skip;
-            let show_to = entry_end.min(end_line);
-
-            for i in show_from..show_to {
-                let line_idx = i - current_line;
-                if let Some(line) = entry.content.get(line_idx) {
-                    match entry.entry_type {
-                        EntryType::Command => {
-                            if let Some(cmd) = entry.content.first() {
-                                if i == current_line {
-                                    let cwd_display = shorten_cwd(&entry.cwd);
-                                    let cmd_display = format!("$ {}", cmd);
-
-                                    let line = Line::from(vec![
-                                        Span::styled(
-                                            cwd_display,
-                                            Style::default().fg(Color::Green).bg(Color::Black),
-                                        ),
-                                        Span::styled(
-                                            cmd_display,
-                                            Style::default().fg(Color::DarkGray).bg(Color::Black),
-                                        ),
-                                    ]);
-                                    items.push(ListItem::new(line));
-                                }
-                            }
-                        }
-                        EntryType::Output => {
-                            items.push(ListItem::new(Line::from(Span::styled(line, output_fg))));
-                        }
-                        EntryType::System => {
-                            items.push(ListItem::new(Line::from(Span::styled(line, gray))));
-                        }
-                    }
-                }
-            }
-
-            current_line = entry_end;
-            if current_line >= end_line {
-                break;
-            }
-        }
-
-        let list = List::new(items).style(output_bg);
-        f.render_widget(list, list_area);
-
-        let prompt_text = " $ ";
-        let input_with_cursor = if app.current_input.is_empty() {
-            format!("{}|", prompt_text)
-        } else if app.cursor_position == 0 {
-            format!("{}|{}", prompt_text, app.current_input)
-        } else if app.cursor_position >= app.current_input.len() {
-            format!("{}{}|", prompt_text, app.current_input)
-        } else {
-            let before_cursor = &app.current_input[..app.cursor_position];
-            let after_cursor = &app.current_input[app.cursor_position..];
-            format!("{}{}|{}", prompt_text, before_cursor, after_cursor)
-        };
-        let input_widget = Paragraph::new(input_with_cursor.as_str()).style(input_prompt_fg);
-        f.render_widget(input_widget, input_area);
-
-        if app.show_suggestions && !app.current_suggestions.is_empty() {
-            let visible = app.visible_suggestions();
-            let _total_suggestions = app.current_suggestions.len();
-            let has_more = app.has_more_suggestions();
-
-            let display_height = if has_more {
-                MAX_VISIBLE_SUGGESTIONS + 1
-            } else {
-                visible.len().min(MAX_VISIBLE_SUGGESTIONS)
-            };
-            let display_height = display_height as u16;
-
-            let mut suggestions_items: Vec<ListItem> = visible
-                .iter()
-                .enumerate()
-                .map(|(i, s)| {
-                    let global_idx = app.suggestion_scroll_offset + i;
-                    if global_idx == app.selected_suggestion {
-                        ListItem::new(Line::from(Span::styled(
-                            s,
-                            Style::default().bg(Color::Blue).fg(Color::White),
-                        )))
-                    } else {
-                        ListItem::new(Line::from(Span::raw(s)))
-                    }
-                })
-                .collect();
-
-            if has_more {
-                let more_item = ListItem::new(Line::from(Span::styled(
-                    "...",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                suggestions_items.push(more_item);
-            }
-
-            let suggestions_list = List::new(suggestions_items).style(gray);
-            let suggestions_area = Rect {
-                x: 2,
-                y: input_area.y.saturating_sub(display_height as u16),
-                width: 40.min(input_area.width - 2),
-                height: display_height,
-            };
-            f.render_widget(suggestions_list, suggestions_area);
-        }
-    })?;
-    Ok(())
-}
+use nsh::{render, App, Entry, EntryType, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP, SCROLL_STEP};
+use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> std::io::Result<()> {
+    // Initialize terminal for alternate screen buffer
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -467,6 +20,7 @@ fn main() -> std::io::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
+    // Initialize application state
     let mut app = App::new();
     app.add_entry(Entry {
         entry_type: EntryType::System,
@@ -480,6 +34,7 @@ fn main() -> std::io::Result<()> {
 
     let mut running = true;
 
+    // Main event loop - processes keyboard and mouse input
     while running {
         render(&mut terminal, &app)?;
 
@@ -497,36 +52,48 @@ fn main() -> std::io::Result<()> {
                                     .unwrap_or_else(|_| "~".to_string());
 
                                 match key.code {
+                                    // Character input
                                     KeyCode::Char(c) => {
                                         if key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                                            if c == 'c' {
-                                                app.add_entry(Entry {
-                                                    entry_type: EntryType::Command,
-                                                    content: vec!["^C".to_string()],
-                                                    cwd: cwd.clone(),
-                                                });
-                                                app.current_input.clear();
-                                                app.cursor_position = 0;
-                                                app.history_index = None;
-                                                app.show_suggestions = false;
-                                            } else if c == 'd' {
-                                                if app.current_input.is_empty() {
-                                                    running = false;
+                                            match c {
+                                                'c' => {
+                                                    // Interrupt - cancel input
+                                                    app.add_entry(Entry {
+                                                        entry_type: EntryType::Command,
+                                                        content: vec!["^C".to_string()],
+                                                        cwd: cwd.clone(),
+                                                    });
+                                                    app.current_input.clear();
+                                                    app.cursor_position = 0;
+                                                    app.history_index = None;
+                                                    app.show_suggestions = false;
                                                 }
-                                            } else if c == 'p' {
-                                                if app.show_suggestions
-                                                    && app.has_more_suggestions()
-                                                {
-                                                    app.suggestion_page_down();
+                                                'd' => {
+                                                    // EOF - exit shell
+                                                    if app.current_input.is_empty() {
+                                                        running = false;
+                                                    }
                                                 }
+                                                'p' => {
+                                                    // Page down in suggestions
+                                                    if app.show_suggestions
+                                                        && app.has_more_suggestions()
+                                                    {
+                                                        app.suggestion_page_down();
+                                                    }
+                                                }
+                                                _ => {}
                                             }
                                         } else {
+                                            // Regular character input
                                             app.current_input.insert(app.cursor_position, c);
                                             app.cursor_position += 1;
                                             app.history_index = None;
                                             app.update_suggestions();
                                         }
                                     }
+
+                                    // Text editing
                                     KeyCode::Backspace => {
                                         if app.cursor_position > 0 {
                                             app.cursor_position -= 1;
@@ -551,17 +118,25 @@ fn main() -> std::io::Result<()> {
                                             app.cursor_position += 1;
                                         }
                                     }
+
+                                    // Command execution
                                     KeyCode::Enter => {
                                         let input = app.current_input.clone();
+
+                                        // Handle built-in exit/quit commands
                                         if input == "exit" || input == "quit" {
                                             running = false;
                                         } else if !input.is_empty() {
+                                            // Execute command and capture output
                                             app.add_entry(Entry {
                                                 entry_type: EntryType::Command,
                                                 content: vec![input.clone()],
                                                 cwd: cwd.clone(),
                                             });
-                                            let output = execute_command(&input);
+
+                                            let output = nsh::execute_command(&input);
+
+                                            // Handle clear command
                                             if output.iter().any(|s| s == "__CLEAR__") {
                                                 app.clear();
                                             } else if !output.is_empty() {
@@ -572,6 +147,8 @@ fn main() -> std::io::Result<()> {
                                                 });
                                             }
                                         }
+
+                                        // Reset input state
                                         app.current_input.clear();
                                         app.cursor_position = 0;
                                         app.saved_input.clear();
@@ -579,8 +156,11 @@ fn main() -> std::io::Result<()> {
                                         app.show_suggestions = false;
                                         app.current_suggestions.clear();
                                     }
+
+                                    // Autocompletion
                                     KeyCode::Tab => {
                                         if !app.current_suggestions.is_empty() {
+                                            // Apply selected suggestion
                                             if let Some(s) =
                                                 app.current_suggestions.get(app.selected_suggestion)
                                             {
@@ -594,6 +174,7 @@ fn main() -> std::io::Result<()> {
                                             app.show_suggestions = false;
                                             app.current_suggestions.clear();
                                         } else if !app.current_input.is_empty() {
+                                            // Trigger suggestion lookup
                                             app.update_suggestions();
                                             if app.current_suggestions.len() == 1 {
                                                 if app.current_input.starts_with("cd ") {
@@ -611,17 +192,20 @@ fn main() -> std::io::Result<()> {
                                             }
                                         }
                                     }
+
+                                    // History and suggestion navigation
                                     KeyCode::Up => {
                                         if app.show_suggestions
                                             && !app.current_suggestions.is_empty()
                                         {
+                                            // Navigate suggestions
                                             if app.selected_suggestion > 0 {
                                                 app.selected_suggestion -= 1;
                                             } else {
                                                 app.selected_suggestion =
                                                     app.current_suggestions.len() - 1;
                                             }
-
+                                            // Auto-scroll suggestion page
                                             if app.selected_suggestion
                                                 >= app.suggestion_scroll_offset
                                                     + MAX_VISIBLE_SUGGESTIONS
@@ -638,6 +222,7 @@ fn main() -> std::io::Result<()> {
                                                     .saturating_sub(MAX_VISIBLE_SUGGESTIONS / 2);
                                             }
                                         } else {
+                                            // Navigate command history
                                             let commands = app.get_history_commands();
                                             if commands.is_empty() {
                                                 break;
@@ -659,13 +244,14 @@ fn main() -> std::io::Result<()> {
                                             app.show_suggestions = false;
                                         }
                                     }
+
                                     KeyCode::Down => {
                                         if app.show_suggestions
                                             && !app.current_suggestions.is_empty()
                                         {
+                                            // Navigate suggestions
                                             app.selected_suggestion = (app.selected_suggestion + 1)
                                                 % app.current_suggestions.len();
-
                                             if app.selected_suggestion
                                                 >= app.suggestion_scroll_offset
                                                     + MAX_VISIBLE_SUGGESTIONS
@@ -683,6 +269,7 @@ fn main() -> std::io::Result<()> {
                                                     );
                                             }
                                         } else if let Some(idx) = app.history_index {
+                                            // Navigate command history
                                             let commands = app.get_history_commands();
                                             if idx < commands.len() - 1 {
                                                 app.history_index = Some(idx + 1);
@@ -698,12 +285,15 @@ fn main() -> std::io::Result<()> {
                                             app.show_suggestions = false;
                                         }
                                     }
+
+                                    // Scrolling
                                     KeyCode::PageUp => {
                                         if app.show_suggestions && app.has_more_suggestions() {
                                             app.suggestion_page_up();
                                             app.selected_suggestion = app.suggestion_scroll_offset;
                                         } else {
-                                            app.scroll_offset = app.scroll_offset.saturating_sub(5);
+                                            app.scroll_offset =
+                                                app.scroll_offset.saturating_sub(SCROLL_STEP);
                                         }
                                     }
                                     KeyCode::PageDown => {
@@ -711,12 +301,14 @@ fn main() -> std::io::Result<()> {
                                             app.suggestion_page_down();
                                             app.selected_suggestion = app.suggestion_scroll_offset;
                                         } else {
-                                            app.scroll_offset = (app.scroll_offset + 5)
+                                            app.scroll_offset = (app.scroll_offset + SCROLL_STEP)
                                                 .min(app.total_lines.saturating_sub(1));
                                         }
                                     }
                                     KeyCode::Home => app.scroll_offset = 0,
                                     KeyCode::End => app.scroll_to_bottom(),
+
+                                    // Close suggestions
                                     KeyCode::Esc => {
                                         app.show_suggestions = false;
                                         app.current_suggestions.clear();
@@ -725,18 +317,21 @@ fn main() -> std::io::Result<()> {
                                 }
                                 break;
                             }
+
+                            // Mouse input handling
                             Event::Mouse(mouse) => {
                                 if mouse.kind == MouseEventKind::ScrollUp {
                                     if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_up();
                                     } else {
-                                        app.scroll_offset = app.scroll_offset.saturating_sub(3);
+                                        app.scroll_offset =
+                                            app.scroll_offset.saturating_sub(MOUSE_SCROLL_STEP);
                                     }
                                 } else if mouse.kind == MouseEventKind::ScrollDown {
                                     if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_down();
                                     } else {
-                                        app.scroll_offset = (app.scroll_offset + 3)
+                                        app.scroll_offset = (app.scroll_offset + MOUSE_SCROLL_STEP)
                                             .min(app.total_lines.saturating_sub(1));
                                     }
                                 }
@@ -755,6 +350,7 @@ fn main() -> std::io::Result<()> {
         }
     }
 
+    // Cleanup - restore terminal to normal mode
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
