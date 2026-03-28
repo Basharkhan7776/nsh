@@ -2,13 +2,14 @@
 // Terminal-based shell with TUI, autocompletion, and command history
 
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, MouseEventKind,
-    },
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use nsh::{render, App, Entry, EntryType, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP, SCROLL_STEP};
+use nsh::{
+    keybindings::{execute_action, get_action, Action},
+    render, App, Entry, EntryType, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP, SCROLL_STEP,
+};
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 fn main() -> std::io::Result<()> {
@@ -51,92 +52,37 @@ fn main() -> std::io::Result<()> {
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_else(|_| "~".to_string());
 
-                                match key.code {
-                                    // Character input
-                                    KeyCode::Char(c) => {
-                                        if key.modifiers.contains(event::KeyModifiers::CONTROL) {
-                                            match c {
-                                                'c' => {
-                                                    // Interrupt - cancel input
-                                                    app.add_entry(Entry {
-                                                        entry_type: EntryType::Command,
-                                                        content: vec!["^C".to_string()],
-                                                        cwd: cwd.clone(),
-                                                    });
-                                                    app.current_input.clear();
-                                                    app.cursor_position = 0;
-                                                    app.history_index = None;
-                                                    app.show_suggestions = false;
-                                                }
-                                                'd' => {
-                                                    // EOF - exit shell
-                                                    if app.current_input.is_empty() {
-                                                        running = false;
-                                                    }
-                                                }
-                                                'p' => {
-                                                    // Page down in suggestions
-                                                    if app.show_suggestions
-                                                        && app.has_more_suggestions()
-                                                    {
-                                                        app.suggestion_page_down();
-                                                    }
-                                                }
-                                                _ => {}
-                                            }
-                                        } else {
-                                            // Regular character input
-                                            app.current_input.insert(app.cursor_position, c);
-                                            app.cursor_position += 1;
-                                            app.history_index = None;
-                                            app.update_suggestions();
-                                        }
-                                    }
+                                let action = get_action(key.code, key.modifiers);
 
-                                    // Text editing
-                                    KeyCode::Backspace => {
-                                        if app.cursor_position > 0 {
-                                            app.cursor_position -= 1;
-                                            app.current_input.remove(app.cursor_position);
-                                            app.history_index = None;
-                                            app.update_suggestions();
+                                // Handle special actions that need cwd or custom logic
+                                match action {
+                                    Action::Interrupt => {
+                                        app.add_entry(Entry {
+                                            entry_type: EntryType::Command,
+                                            content: vec!["^C".to_string()],
+                                            cwd: cwd.clone(),
+                                        });
+                                        app.current_input.clear();
+                                        app.cursor_position = 0;
+                                        app.history_index = None;
+                                        app.show_suggestions = false;
+                                    }
+                                    Action::Eof => {
+                                        if app.current_input.is_empty() {
+                                            running = false;
                                         }
                                     }
-                                    KeyCode::Delete => {
-                                        if app.cursor_position < app.current_input.len() {
-                                            app.current_input.remove(app.cursor_position);
-                                            app.update_suggestions();
-                                        }
-                                    }
-                                    KeyCode::Left => {
-                                        if app.cursor_position > 0 {
-                                            app.cursor_position -= 1;
-                                        }
-                                    }
-                                    KeyCode::Right => {
-                                        if app.cursor_position < app.current_input.len() {
-                                            app.cursor_position += 1;
-                                        }
-                                    }
-
-                                    // Command execution
-                                    KeyCode::Enter => {
+                                    Action::Execute => {
                                         let input = app.current_input.clone();
-
-                                        // Handle built-in exit/quit commands
                                         if input == "exit" || input == "quit" {
                                             running = false;
                                         } else if !input.is_empty() {
-                                            // Execute command and capture output
                                             app.add_entry(Entry {
                                                 entry_type: EntryType::Command,
                                                 content: vec![input.clone()],
                                                 cwd: cwd.clone(),
                                             });
-
                                             let output = nsh::execute_command(&input);
-
-                                            // Handle clear command
                                             if output.iter().any(|s| s == "__CLEAR__") {
                                                 app.clear();
                                             } else if !output.is_empty() {
@@ -147,8 +93,6 @@ fn main() -> std::io::Result<()> {
                                                 });
                                             }
                                         }
-
-                                        // Reset input state
                                         app.current_input.clear();
                                         app.cursor_position = 0;
                                         app.saved_input.clear();
@@ -156,35 +100,31 @@ fn main() -> std::io::Result<()> {
                                         app.show_suggestions = false;
                                         app.current_suggestions.clear();
                                     }
-
-                                    // Autocompletion
-                                    KeyCode::Tab => {
+                                    Action::Complete => {
                                         if !app.current_suggestions.is_empty() {
-                                            // Apply selected suggestion
                                             if let Some(s) =
                                                 app.current_suggestions.get(app.selected_suggestion)
                                             {
                                                 if app.current_input.starts_with("cd ") {
-                                                    app.current_input = format!("cd {}", s);
+                                                    app.current_input = format!("cd {}", s.0);
                                                 } else {
-                                                    app.current_input = s.clone();
+                                                    app.current_input = s.1.clone();
                                                 }
                                                 app.cursor_position = app.current_input.len();
                                             }
                                             app.show_suggestions = false;
                                             app.current_suggestions.clear();
                                         } else if !app.current_input.is_empty() {
-                                            // Trigger suggestion lookup
                                             app.update_suggestions();
                                             if app.current_suggestions.len() == 1 {
                                                 if app.current_input.starts_with("cd ") {
                                                     app.current_input = format!(
                                                         "cd {}",
-                                                        app.current_suggestions[0]
+                                                        app.current_suggestions[0].0
                                                     );
                                                 } else {
                                                     app.current_input =
-                                                        app.current_suggestions[0].clone();
+                                                        app.current_suggestions[0].1.clone();
                                                 }
                                                 app.cursor_position = app.current_input.len();
                                                 app.show_suggestions = false;
@@ -192,20 +132,16 @@ fn main() -> std::io::Result<()> {
                                             }
                                         }
                                     }
-
-                                    // History and suggestion navigation
-                                    KeyCode::Up => {
+                                    Action::HistoryUp => {
                                         if app.show_suggestions
                                             && !app.current_suggestions.is_empty()
                                         {
-                                            // Navigate suggestions
                                             if app.selected_suggestion > 0 {
                                                 app.selected_suggestion -= 1;
                                             } else {
                                                 app.selected_suggestion =
                                                     app.current_suggestions.len() - 1;
                                             }
-                                            // Auto-scroll suggestion page
                                             if app.selected_suggestion
                                                 >= app.suggestion_scroll_offset
                                                     + MAX_VISIBLE_SUGGESTIONS
@@ -222,34 +158,31 @@ fn main() -> std::io::Result<()> {
                                                     .saturating_sub(MAX_VISIBLE_SUGGESTIONS / 2);
                                             }
                                         } else {
-                                            // Navigate command history
                                             let commands = app.get_history_commands();
-                                            if commands.is_empty() {
-                                                break;
-                                            }
-                                            if app.history_index.is_none() {
-                                                app.saved_input = app.current_input.clone();
-                                                app.history_index = Some(commands.len() - 1);
-                                            } else if let Some(idx) = app.history_index {
-                                                if idx > 0 {
-                                                    app.history_index = Some(idx - 1);
+                                            if !commands.is_empty() {
+                                                if app.history_index.is_none() {
+                                                    app.saved_input = app.current_input.clone();
+                                                    app.history_index = Some(commands.len() - 1);
+                                                } else if let Some(idx) = app.history_index {
+                                                    if idx > 0 {
+                                                        app.history_index = Some(idx - 1);
+                                                    }
                                                 }
-                                            }
-                                            if let Some(idx) = app.history_index {
-                                                if let Some(cmd) = commands.get(idx) {
-                                                    app.current_input = cmd.clone();
-                                                    app.cursor_position = app.current_input.len();
+                                                if let Some(idx) = app.history_index {
+                                                    if let Some(cmd) = commands.get(idx) {
+                                                        app.current_input = cmd.clone();
+                                                        app.cursor_position =
+                                                            app.current_input.len();
+                                                    }
                                                 }
+                                                app.show_suggestions = false;
                                             }
-                                            app.show_suggestions = false;
                                         }
                                     }
-
-                                    KeyCode::Down => {
+                                    Action::HistoryDown => {
                                         if app.show_suggestions
                                             && !app.current_suggestions.is_empty()
                                         {
-                                            // Navigate suggestions
                                             app.selected_suggestion = (app.selected_suggestion + 1)
                                                 % app.current_suggestions.len();
                                             if app.selected_suggestion
@@ -269,7 +202,6 @@ fn main() -> std::io::Result<()> {
                                                     );
                                             }
                                         } else if let Some(idx) = app.history_index {
-                                            // Navigate command history
                                             let commands = app.get_history_commands();
                                             if idx < commands.len() - 1 {
                                                 app.history_index = Some(idx + 1);
@@ -285,9 +217,7 @@ fn main() -> std::io::Result<()> {
                                             app.show_suggestions = false;
                                         }
                                     }
-
-                                    // Scrolling
-                                    KeyCode::PageUp => {
+                                    Action::SuggestionPageUp => {
                                         if app.show_suggestions && app.has_more_suggestions() {
                                             app.suggestion_page_up();
                                             app.selected_suggestion = app.suggestion_scroll_offset;
@@ -296,7 +226,7 @@ fn main() -> std::io::Result<()> {
                                                 app.scroll_offset.saturating_sub(SCROLL_STEP);
                                         }
                                     }
-                                    KeyCode::PageDown => {
+                                    Action::SuggestionPageDown | Action::PageDownSuggestions => {
                                         if app.show_suggestions && app.has_more_suggestions() {
                                             app.suggestion_page_down();
                                             app.selected_suggestion = app.suggestion_scroll_offset;
@@ -305,15 +235,14 @@ fn main() -> std::io::Result<()> {
                                                 .min(app.total_lines.saturating_sub(1));
                                         }
                                     }
-                                    KeyCode::Home => app.scroll_offset = 0,
-                                    KeyCode::End => app.scroll_to_bottom(),
-
-                                    // Close suggestions
-                                    KeyCode::Esc => {
+                                    Action::Cancel => {
                                         app.show_suggestions = false;
                                         app.current_suggestions.clear();
                                     }
-                                    _ => {}
+                                    _ => {
+                                        // Use keybindings module for other actions
+                                        execute_action(&mut app, action);
+                                    }
                                 }
                                 break;
                             }

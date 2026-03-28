@@ -12,5 +12,6 @@ name = "nsh"
 path = "src/main.rs"
 
 [dependencies]
-crossterm = "0.29"
+crossterm = "0.28"
 ratatui = "0.29"
+arboard = "3"

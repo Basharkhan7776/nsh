@@ -21,17 +21,18 @@ pub enum EntryType {
 
 // Application state
 pub struct App {
-    pub entries: Vec<Entry>,              // All history entries
-    pub current_input: String,            // Current input buffer
-    pub cursor_position: usize,           // Cursor position in input
-    pub scroll_offset: usize,             // Output scroll position
-    pub total_lines: usize,               // Total lines in history
-    pub current_suggestions: Vec<String>, // Active autocomplete suggestions
-    pub show_suggestions: bool,           // Whether to display suggestions
-    pub selected_suggestion: usize,       // Currently selected suggestion index
-    pub suggestion_scroll_offset: usize,  // Suggestion page scroll position
-    pub saved_input: String,              // Temporary storage for history navigation
-    pub history_index: Option<usize>,     // Current position in command history
+    pub entries: Vec<Entry>,                        // All history entries
+    pub current_input: String,                      // Current input buffer
+    pub cursor_position: usize,                     // Cursor position in input
+    pub scroll_offset: usize,                       // Output scroll position
+    pub total_lines: usize,                         // Total lines in history
+    pub current_suggestions: Vec<(String, String)>, // (full_path, display_name) for autocomplete
+    pub show_suggestions: bool,                     // Whether to display suggestions
+    pub selected_suggestion: usize,                 // Currently selected suggestion index
+    pub suggestion_scroll_offset: usize,            // Suggestion page scroll position
+    pub saved_input: String,                        // Temporary storage for history navigation
+    pub history_index: Option<usize>,               // Current position in command history
+    pub kill_ring: Vec<String>,                     // Kill ring for Ctrl+W / Ctrl+Y
 }
 
 impl App {
@@ -49,6 +50,7 @@ impl App {
             suggestion_scroll_offset: 0,
             saved_input: String::new(),
             history_index: None,
+            kill_ring: Vec::new(),
         }
     }
 
@@ -98,7 +100,10 @@ impl App {
         if start >= self.current_suggestions.len() {
             return vec![];
         }
-        self.current_suggestions[start..end].to_vec()
+        self.current_suggestions[start..end]
+            .iter()
+            .map(|s| s.1.clone())
+            .collect()
     }
 
     // Check if more suggestions exist beyond visible range
@@ -132,5 +137,123 @@ impl App {
             .saturating_add(MAX_VISIBLE_SUGGESTIONS)
             .min(max_scroll);
         self.selected_suggestion = 0;
+    }
+
+    // Move cursor to start of current word (going backward)
+    pub fn word_start_backward(&self) -> usize {
+        let input = &self.current_input[..self.cursor_position];
+        if input.is_empty() {
+            return 0;
+        }
+
+        let mut pos = input.len();
+        let mut prev_was_word = false;
+
+        for (i, c) in input.char_indices().rev() {
+            let is_word_char = c.is_alphanumeric() || c == '_';
+            if !prev_was_word && is_word_char && i > 0 {
+                pos = i;
+                break;
+            }
+            prev_was_word = is_word_char;
+            pos = i;
+        }
+
+        pos
+    }
+
+    // Move cursor to end of current word (going forward)
+    pub fn word_start_forward(&self) -> usize {
+        let input = &self.current_input[self.cursor_position..];
+        let mut pos = self.cursor_position;
+
+        let mut chars = input.char_indices();
+        let _ = chars.next(); // Skip current char
+
+        let mut prev_was_word = false;
+        for (i, c) in chars {
+            let is_word_char = c.is_alphanumeric() || c == '_';
+            if !prev_was_word && is_word_char {
+                pos = i + self.cursor_position;
+                break;
+            }
+            prev_was_word = is_word_char;
+            pos = i + self.cursor_position + 1;
+        }
+
+        if pos > input.len() + self.cursor_position {
+            pos = self.current_input.len();
+        }
+
+        pos
+    }
+
+    // Delete word before cursor (bash-style, save to kill ring)
+    pub fn delete_word_before(&mut self) {
+        let word_start = self.word_start_backward();
+        if word_start < self.cursor_position {
+            let deleted = self.current_input[word_start..self.cursor_position].to_string();
+            if !deleted.is_empty() {
+                self.kill_ring.insert(0, deleted);
+                if self.kill_ring.len() > 100 {
+                    self.kill_ring.pop();
+                }
+            }
+            self.current_input.drain(word_start..self.cursor_position);
+            self.cursor_position = word_start;
+            self.history_index = None;
+            self.update_suggestions();
+        }
+    }
+
+    // Delete word after cursor
+    pub fn delete_word_after(&mut self) {
+        let word_end = self.word_start_forward();
+        if self.cursor_position < word_end {
+            self.current_input.drain(self.cursor_position..word_end);
+            self.update_suggestions();
+        }
+    }
+
+    // Delete from cursor to line start
+    pub fn delete_to_line_start(&mut self) {
+        if self.cursor_position > 0 {
+            let deleted = self.current_input[..self.cursor_position].to_string();
+            if !deleted.is_empty() {
+                self.kill_ring.insert(0, deleted);
+                if self.kill_ring.len() > 100 {
+                    self.kill_ring.pop();
+                }
+            }
+            self.current_input.drain(..self.cursor_position);
+            self.cursor_position = 0;
+            self.history_index = None;
+            self.update_suggestions();
+        }
+    }
+
+    // Delete from cursor to line end
+    pub fn delete_to_line_end(&mut self) {
+        if self.cursor_position < self.current_input.len() {
+            let deleted = self.current_input[self.cursor_position..].to_string();
+            if !deleted.is_empty() {
+                self.kill_ring.insert(0, deleted);
+                if self.kill_ring.len() > 100 {
+                    self.kill_ring.pop();
+                }
+            }
+            self.current_input.drain(self.cursor_position..);
+            self.update_suggestions();
+        }
+    }
+
+    // Yank (paste) last killed text
+    pub fn yank(&mut self) {
+        if let Some(text) = self.kill_ring.first() {
+            self.current_input.insert_str(self.cursor_position, text);
+            self.cursor_position += text.len();
+            self.history_index = None;
+            self.update_suggestions();
+        }
     }
 }
