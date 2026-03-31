@@ -1,8 +1,13 @@
 // Library root - public API exports
 
+pub mod ai;
 pub mod modules;
+pub mod storage;
+pub mod tools;
+pub mod rag;
 
 // Re-export public types and functions
+pub use ai::{create_provider, AiConfig, AiError, AiProvider, ProviderType};
 pub use modules::commands::{execute_command, shorten_cwd};
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{
@@ -13,3 +18,5 @@ pub use modules::config::{
 pub use modules::keybindings;
 pub use modules::render::render;
 pub use modules::state::{App, Entry, EntryType};
+pub use storage::{LocalStorage, NshConfig, StorageError, VectorError, VectorStore};
+pub use tools::{cat, execute_tool, get_tool_definitions, grep, ls, web_search};
