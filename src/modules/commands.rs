@@ -53,10 +53,15 @@ pub fn execute_command(input: &str) -> Vec<String> {
                 "  do <task>       - Execute task (future)".to_string(),
                 "  plan <goal>     - Plan goal (future)".to_string(),
                 "  build <project> - Build project (future)".to_string(),
+                "  settings        - Open AI settings".to_string(),
                 "  cd <dir>        - Change directory".to_string(),
                 "  clear           - Clear screen".to_string(),
                 "  exit / quit     - Exit shell".to_string(),
             ];
+        }
+
+        "settings" => {
+            return vec!["__SETTINGS__".to_string()];
         }
 
         "ask" | "do" | "plan" | "build" => {

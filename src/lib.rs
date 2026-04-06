@@ -7,7 +7,7 @@ pub mod tools;
 pub mod rag;
 
 // Re-export public types and functions
-pub use ai::{create_provider, AiConfig, AiError, AiProvider, ProviderType};
+pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
 pub use modules::commands::{execute_command, shorten_cwd};
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{

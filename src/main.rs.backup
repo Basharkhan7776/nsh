@@ -433,11 +433,7 @@ fn handle_settings_input(
                     SettingsField::Model => {
                         if !state.available_models.is_empty() {
                             state.show_model_dropdown = true;
-                            if let Some(idx) = state
-                                .available_models
-                                .iter()
-                                .position(|m| m == &state.model)
-                            {
+                            if let Some(idx) = state.available_models.iter().position(|m| m == &state.model) {
                                 state.dropdown_cursor = idx;
                             } else {
                                 state.dropdown_cursor = 0;
@@ -467,6 +463,114 @@ fn handle_settings_input(
             }
         }
         KeyCode::Backspace => {
+            if field == SettingsField::BaseUrl {
+                state.base_url.pop();
+            } else if field == SettingsField::ApiKey {
+                state.api_key.pop();
+                state.api_key_original = state.api_key.clone();
+            }
+        }
+        _ => {}
+    }
+}
+        KeyCode::Up => {
+            if is_dropdown_open {
+                if state.dropdown_cursor > 0 {
+                    state.dropdown_cursor -= 1;
+                }
+            } else {
+                app.settings_move_up();
+            }
+        }
+        KeyCode::Down => {
+            if is_dropdown_open {
+                let max = if state.show_provider_dropdown {
+                    ProviderType::count() - 1
+                } else {
+                    state.available_models.len().saturating_sub(1)
+                };
+                if state.dropdown_cursor < max {
+                    state.dropdown_cursor += 1;
+                }
+            } else {
+                app.settings_move_down();
+            }
+        }
+        KeyCode::Enter => {
+            let field = app.settings_field();
+
+            if is_dropdown_open {
+                if state.show_provider_dropdown {
+                    state.provider = ProviderType::from_index(state.dropdown_cursor);
+                    state.base_url = state.provider.default_url().to_string();
+                    state.model = "".to_string();
+                    state.show_provider_dropdown = false;
+                    state.dropdown_cursor = 0;
+
+                    // Fetch models for new provider
+                    let rt = tokio::runtime::Runtime::new().unwrap();
+                    state.available_models =
+                        rt.block_on(fetch_models(state.provider, &state.base_url));
+                    if !state.available_models.is_empty() {
+                        state.model = state.available_models[0].clone();
+                    }
+                } else if state.show_model_dropdown {
+                    if let Some(model) = state.available_models.get(state.dropdown_cursor) {
+                        state.model = model.clone();
+                    }
+                    state.show_model_dropdown = false;
+                    state.dropdown_cursor = 0;
+                }
+            } else {
+                match field {
+                    SettingsField::Provider => {
+                        state.show_provider_dropdown = true;
+                        state.dropdown_cursor = match state.provider {
+                            ProviderType::Ollama => 0,
+                            ProviderType::OpenAI => 1,
+                            ProviderType::Anthropic => 2,
+                            ProviderType::OpenAICompatible => 3,
+                        };
+                    }
+                    SettingsField::Model => {
+                        if !state.available_models.is_empty() {
+                            state.show_model_dropdown = true;
+                            if let Some(idx) = state
+                                .available_models
+                                .iter()
+                                .position(|m| m == &state.model)
+                            {
+                                state.dropdown_cursor = idx;
+                            } else {
+                                state.dropdown_cursor = 0;
+                            }
+                        }
+                    }
+                    SettingsField::Save => {
+                        save_settings_state(state);
+                        app.show_settings = false;
+                    }
+                    SettingsField::Cancel => {
+                        app.show_settings = false;
+                    }
+                    SettingsField::Enable => {
+                        state.enabled = !state.enabled;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            let field = app.settings_field();
+            if field == SettingsField::BaseUrl {
+                state.base_url.push(c);
+            } else if field == SettingsField::ApiKey {
+                state.api_key.push(c);
+                state.api_key_original = state.api_key.clone();
+            }
+        }
+        KeyCode::Backspace => {
+            let field = app.settings_field();
             if field == SettingsField::BaseUrl {
                 state.base_url.pop();
             } else if field == SettingsField::ApiKey {

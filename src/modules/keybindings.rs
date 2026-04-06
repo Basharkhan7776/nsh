@@ -103,6 +103,7 @@ pub struct KeyBindings {
     pub cancel: KeyCombo,
     pub execute: KeyCombo,
     pub page_down_suggestions: KeyCombo,
+    pub open_settings: KeyCombo,
 }
 
 impl Default for KeyBindings {
@@ -145,6 +146,7 @@ impl Default for KeyBindings {
             eof: KeyCombo::ctrl('d'),
             cancel: KeyCombo::code(KeyCode::Esc),
             execute: KeyCombo::code(KeyCode::Enter),
+            open_settings: KeyCombo::ctrl(','),
         }
     }
 }
@@ -193,6 +195,7 @@ pub enum Action {
     PageDownSuggestions,
     Complete,
     InsertChar(char),
+    OpenSettings,
 }
 
 pub fn get_action(key_code: KeyCode, modifiers: KeyModifiers) -> Action {
@@ -275,6 +278,9 @@ pub fn get_action(key_code: KeyCode, modifiers: KeyModifiers) -> Action {
     }
     if bindings.matches(key_code, modifiers, &bindings.complete) {
         return Action::Complete;
+    }
+    if bindings.matches(key_code, modifiers, &bindings.open_settings) {
+        return Action::OpenSettings;
     }
 
     // Character input (no modifiers or shift only)
@@ -454,6 +460,10 @@ pub fn execute_action(app: &mut App, action: Action) {
         }
 
         Action::Complete => {
+            // Handled in main loop
+        }
+
+        Action::OpenSettings => {
             // Handled in main loop
         }
 

@@ -24,6 +24,31 @@ pub enum ProviderType {
     OpenAICompatible,
 }
 
+impl ProviderType {
+    pub fn count() -> usize {
+        4
+    }
+
+    pub fn from_index(idx: usize) -> Self {
+        match idx {
+            0 => ProviderType::Ollama,
+            1 => ProviderType::OpenAI,
+            2 => ProviderType::Anthropic,
+            3 => ProviderType::OpenAICompatible,
+            _ => ProviderType::Ollama,
+        }
+    }
+
+    pub fn default_url(&self) -> &'static str {
+        match self {
+            ProviderType::Ollama => "http://localhost:11434",
+            ProviderType::OpenAI => "https://api.openai.com/v1",
+            ProviderType::Anthropic => "https://api.anthropic.com",
+            ProviderType::OpenAICompatible => "http://localhost:11434/v1",
+        }
+    }
+}
+
 impl Default for AiConfig {
     fn default() -> Self {
         Self {

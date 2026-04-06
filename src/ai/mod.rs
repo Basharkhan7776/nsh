@@ -19,6 +19,73 @@ pub enum AiError {
     Request(String),
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OllamaModel {
+    pub name: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default, rename = "digest")]
+    pub digest: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct OllamaTagsResponse {
+    models: Vec<OllamaModel>,
+}
+
+pub async fn fetch_models(provider: ProviderType, base_url: &str) -> Vec<String> {
+    match provider {
+        ProviderType::Ollama => {
+            fetch_ollama_models(base_url).await.unwrap_or_else(|_| default_ollama_models())
+        }
+        ProviderType::OpenAI => default_openai_models(),
+        ProviderType::Anthropic => default_anthropic_models(),
+        ProviderType::OpenAICompatible => default_openai_models(),
+    }
+}
+
+async fn fetch_ollama_models(base_url: &str) -> Result<Vec<String>, reqwest::Error> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
+    
+    let response = client.get(&url).send().await?;
+    let data: OllamaTagsResponse = response.json().await?;
+    
+    Ok(data.models.into_iter().map(|m| m.name).collect())
+}
+
+fn default_ollama_models() -> Vec<String> {
+    vec![
+        "llama3.2:latest".to_string(),
+        "llama3.2:1b".to_string(),
+        "llama3.2:7b".to_string(),
+        "llama3.1:latest".to_string(),
+        "llama3.1:8b".to_string(),
+        "mistral:latest".to_string(),
+        "codellama:latest".to_string(),
+        "phi3:latest".to_string(),
+    ]
+}
+
+fn default_openai_models() -> Vec<String> {
+    vec![
+        "gpt-4o".to_string(),
+        "gpt-4o-mini".to_string(),
+        "gpt-4-turbo".to_string(),
+        "gpt-3.5-turbo".to_string(),
+    ]
+}
+
+fn default_anthropic_models() -> Vec<String> {
+    vec![
+        "claude-sonnet-4-20250514".to_string(),
+        "claude-3-5-sonnet-20241022".to_string(),
+        "claude-3-5-haiku-20241022".to_string(),
+        "claude-3-opus-20240229".to_string(),
+        "claude-3-haiku-20240307".to_string(),
+    ]
+}
+
 pub struct AiProvider {
     provider: OpenAICompatible<DynamicModel>,
     config: config::AiConfig,
