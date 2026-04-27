@@ -2,7 +2,7 @@
 
 use super::commands::shorten_cwd;
 use super::config::*;
-use super::state::{App, EntryType};
+use super::state::{App, EntryType, SettingsPage};
 use crate::ai::ProviderType;
 use ratatui::{
     backend::CrosstermBackend,
@@ -13,15 +13,13 @@ use ratatui::{
     Terminal,
 };
 
-const DIALOG_WIDTH: u16 = 50;
-
 pub fn render(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &App,
 ) -> std::io::Result<()> {
     terminal.draw(|f| {
         if app.show_settings {
-            render_settings_dialog(f, app);
+            render_settings(f, app);
         } else {
             render_shell(f, app);
         }
@@ -30,7 +28,6 @@ pub fn render(
 }
 
 fn render_shell(f: &mut ratatui::Frame, app: &App) {
-    // Define styles for each UI element
     let output_bg = Style::default().bg(OUTPUT_BG);
     let output_fg = Style::default().fg(OUTPUT_FG).bg(OUTPUT_BG);
     let cwd_style = Style::default().fg(CWD_FG).bg(OUTPUT_BG);
@@ -39,22 +36,19 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
     let suggestion_style = Style::default().fg(SUGGESTION_INDICATOR_FG).bg(INPUT_BG);
     let system_style = Style::default().fg(SYSTEM_FG).bg(OUTPUT_BG);
 
-    // Split terminal into output and input areas
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(f.area());
 
-    let list_area = chunks[0]; // History/output area
-    let input_area = chunks[1]; // Input line area
+    let list_area = chunks[0];
+    let input_area = chunks[1];
 
-    // Calculate visible range based on scroll offset
     let visible_height = list_area.height as usize;
     let content_height = app.entries.iter().map(|e| e.content.len()).sum::<usize>();
     let start_line = app.scroll_offset;
     let end_line = (start_line + visible_height).min(content_height);
 
-    // Build list of visible items
     let mut current_line = 0;
     let mut items: Vec<ListItem> = Vec::new();
 
@@ -62,13 +56,11 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
         let entry_height = entry.content.len();
         let entry_end = current_line + entry_height;
 
-        // Skip entries above visible range
         if entry_end <= start_line {
             current_line = entry_end;
             continue;
         }
 
-        // Calculate visible portion within entry
         let skip = if current_line < start_line {
             start_line - current_line
         } else {
@@ -77,7 +69,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
         let show_from = current_line + skip;
         let show_to = entry_end.min(end_line);
 
-        // Render each visible line
         for i in show_from..show_to {
             let line_idx = i - current_line;
             if let Some(line) = entry.content.get(line_idx) {
@@ -85,7 +76,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
                     EntryType::Command => {
                         if let Some(cmd) = entry.content.first() {
                             if i == current_line {
-                                // Format: <cwd> $ <command>
                                 let cwd_display = shorten_cwd(&entry.cwd);
                                 let cmd_display = format!("$ {}", cmd);
 
@@ -113,11 +103,9 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
         }
     }
 
-    // Render output area
     let list = List::new(items).style(output_bg);
     f.render_widget(list, list_area);
 
-    // Render input line with cursor
     let input_with_cursor = if app.current_input.is_empty() {
         format!("{}|", PROMPT_TEXT)
     } else if app.cursor_position == 0 {
@@ -132,7 +120,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
     let input_widget = Paragraph::new(input_with_cursor.as_str()).style(input_style);
     f.render_widget(input_widget, input_area);
 
-    // Render suggestion popup if visible
     if app.show_suggestions && !app.current_suggestions.is_empty() {
         let visible = app.visible_suggestions();
         let has_more = app.has_more_suggestions();
@@ -144,7 +131,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
         };
         let display_height = display_height as u16;
 
-        // Build suggestion list items
         let mut suggestions_items: Vec<ListItem> = visible
             .iter()
             .enumerate()
@@ -163,7 +149,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
             })
             .collect();
 
-        // Add "more" indicator if additional suggestions exist
         if has_more {
             let more_item = ListItem::new(Line::from(Span::styled(
                 "...",
@@ -172,7 +157,6 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
             suggestions_items.push(more_item);
         }
 
-        // Render suggestion popup
         let suggestions_list = List::new(suggestions_items).style(suggestion_style);
         let suggestions_area = Rect {
             x: 2,
@@ -184,38 +168,43 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
     }
 }
 
-fn render_settings_dialog(f: &mut ratatui::Frame, app: &App) {
+fn render_settings(f: &mut ratatui::Frame, app: &App) {
+    let page = app.current_settings_page();
+    match page {
+        SettingsPage::Home => render_home_page(f, app),
+        SettingsPage::Provider => render_provider_page(f, app),
+        SettingsPage::Model => render_model_page(f, app),
+        SettingsPage::BaseUrl => render_baseurl_page(f, app),
+        SettingsPage::ApiKey => render_apikey_page(f, app),
+        SettingsPage::Enable => render_enable_page(f, app),
+    }
+}
+
+fn highlight_style(selected: bool) -> Style {
+    if selected {
+        Style::default()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(OUTPUT_FG)
+    }
+}
+
+fn cursor_prefix(is_selected: bool) -> &'static str {
+    if is_selected { "▶ " } else { "  " }
+}
+
+fn render_home_page(f: &mut ratatui::Frame, app: &App) {
     let area = f.area();
-
-    // Full screen overlay with semi-transparent background
-    let overlay = Block::default().style(Style::default().bg(Color::Rgb(0, 0, 0).into()));
-    f.render_widget(overlay, area);
-
-    // Settings panel - centered, 60% width
-    let panel_width = (area.width as f32 * 0.6) as u16;
-    let panel_height = (area.height as f32 * 0.7) as u16;
-    let x = (area.width - panel_width) / 2;
-    let y = (area.height - panel_height) / 2;
-
-    let panel_rect = Rect::new(x, y, x + panel_width, y + panel_height);
-
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
-        .title("⚙ AI Settings")
-        .title_style(
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )
+        .title(" AI Settings ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
 
-    f.render_widget(block, panel_rect);
-
-    let inner = panel_rect.inner(Margin {
-        vertical: 1,
-        horizontal: 1,
-    });
+    let inner = area.inner(Margin { vertical: 2, horizontal: 3 });
     let state = &app.settings_state;
     let cursor = app.settings_cursor;
 
@@ -226,157 +215,275 @@ fn render_settings_dialog(f: &mut ratatui::Frame, app: &App) {
         ProviderType::OpenAICompatible => "OpenAI Compatible",
     };
 
-    let enable_str = if state.enabled { "Yes" } else { "No" };
     let api_key_str = if state.api_key_original.is_empty() {
         "(empty)"
     } else {
         "••••••••••••••"
     };
+    let enable_str = if state.enabled { "Yes" } else { "No" };
 
-    // Build lines as strings
-    let lines: Vec<String> = vec![
-        format!(
-            "{}Provider:  {}",
-            if cursor == 0 { "▶ " } else { "  " },
-            provider_str
-        ),
-        format!(
-            "{}Model:     {}",
-            if cursor == 1 { "▶ " } else { "  " },
-            state.model
-        ),
-        format!(
-            "{}Base URL:  {}",
-            if cursor == 2 { "▶ " } else { "  " },
-            state.base_url
-        ),
-        format!(
-            "{}API Key:   {}",
-            if cursor == 3 { "▶ " } else { "  " },
-            api_key_str
-        ),
-        format!(
-            "{}Enable:    {}",
-            if cursor == 4 { "▶ " } else { "  " },
-            enable_str
-        ),
+    let items = [
+        format!("{:<12} {}", "Provider:", provider_str),
+        format!("{:<12} {}", "Model:", state.model),
+        format!("{:<12} {}", "Base URL:", state.base_url),
+        format!("{:<12} {}", "API Key:", api_key_str),
+        format!("{:<12} {}", "Enable:", enable_str),
         String::new(),
-        format!(
-            "{}[ Save ]{}  [ Cancel ]",
-            if cursor == 5 { "▶ " } else { "  " },
-            if cursor == 6 { " " } else { "  " }
-        ),
+        format!("[ Save ]   [ Cancel ]"),
     ];
 
-    // Render lines - selected items in green, others in white
-    for (i, line) in lines.iter().enumerate() {
+    for (i, line) in items.iter().enumerate() {
         let y = inner.y + i as u16;
-        if y < inner.y + inner.height {
-            let style = if i < 5 && cursor == i as usize {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else if i == 6 && cursor == 5 {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else if i == 6 && cursor == 6 {
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(ratatui::style::Modifier::BOLD)
-            } else {
-                Style::default().fg(OUTPUT_FG)
-            };
-            f.render_widget(
-                Paragraph::new(line.as_str()).style(style),
-                Rect::new(inner.x, y, inner.x + inner.width, y + 1),
-            );
+        if y >= inner.y + inner.height {
+            break;
         }
+        let is_field = i < 5;
+        let is_save = i == 6 && cursor == 5;
+        let is_cancel = i == 6 && cursor == 6;
+        let selected = (is_field && cursor == i) || is_save || is_cancel;
+
+        let prefix = if is_field {
+            cursor_prefix(cursor == i)
+        } else if i == 6 {
+            if cursor == 5 {
+                "  ▶ "
+            } else if cursor == 6 {
+                cursor_prefix(true)
+            } else {
+                "    "
+            }
+        } else {
+            ""
+        };
+
+        let display = format!("{}{}", prefix, line);
+        f.render_widget(
+            Paragraph::new(display).style(highlight_style(selected)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
     }
 
-    // Dropdown rendering
-    if state.show_provider_dropdown {
-        let dropdown_height = ProviderType::count() as u16;
-        let dropdown_rect = Rect::new(
-            inner.x + 12,
-            inner.y + 1,
-            inner.x + 35,
-            inner.y + 1 + dropdown_height,
-        );
+    let hint = " Esc: Close   Enter: Select   ↑↓: Navigate ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
+}
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
-            .style(Style::default().bg(Color::Black).fg(Color::White));
-        f.render_widget(block, dropdown_rect);
+fn render_provider_page(f: &mut ratatui::Frame, app: &App) {
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Select Provider ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
 
-        for (i, provider) in [
-            ProviderType::Ollama,
-            ProviderType::OpenAI,
-            ProviderType::Anthropic,
-            ProviderType::OpenAICompatible,
-        ]
-        .iter()
-        .enumerate()
-        {
-            let name = match provider {
-                ProviderType::Ollama => "Ollama",
-                ProviderType::OpenAI => "OpenAI",
-                ProviderType::Anthropic => "Anthropic",
-                ProviderType::OpenAICompatible => "OpenAI Compatible",
-            };
-            let is_selected = i == state.dropdown_cursor;
-            let style = if is_selected {
-                Style::default().bg(Color::Green).fg(Color::Black)
-            } else {
-                Style::default().fg(Color::White)
-            };
-            f.render_widget(
-                Paragraph::new(name).style(style),
-                Rect::new(
-                    dropdown_rect.x + 1,
-                    dropdown_rect.y + i as u16,
-                    dropdown_rect.right() - 1,
-                    dropdown_rect.y + i as u16 + 1,
-                ),
-            );
+    let inner = area.inner(Margin { vertical: 2, horizontal: 4 });
+    let cursor = app.settings_cursor;
+    let current = app.settings_state.provider;
+
+    let providers = [
+        (ProviderType::Ollama, "Ollama — Local LLMs via Ollama"),
+        (ProviderType::OpenAI, "OpenAI — GPT models via API"),
+        (ProviderType::Anthropic, "Anthropic — Claude models via API"),
+        (ProviderType::OpenAICompatible, "OpenAI Compatible — Custom endpoint"),
+    ];
+
+    for (i, (p, label)) in providers.iter().enumerate() {
+        let y = inner.y + i as u16;
+        if y >= inner.y + inner.height {
+            break;
         }
+        let selected_mark = if *p == current { " ✓" } else { "" };
+        let prefix = cursor_prefix(cursor == i);
+        let display = format!("{}{}{}", prefix, label, selected_mark);
+        f.render_widget(
+            Paragraph::new(display).style(highlight_style(cursor == i)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
     }
 
-    if state.show_model_dropdown && !state.available_models.is_empty() {
-        let dropdown_height = state.available_models.len().min(6) as u16;
-        let dropdown_rect = Rect::new(
-            inner.x + 12,
-            inner.y + 2,
-            inner.x + 45,
-            inner.y + 2 + dropdown_height,
+    let hint = " Esc: Back   Enter: Select   ↑↓: Navigate ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
+}
+
+fn render_model_page(f: &mut ratatui::Frame, app: &App) {
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Select Model ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
+
+    let inner = area.inner(Margin { vertical: 2, horizontal: 4 });
+    let cursor = app.settings_cursor;
+    let models = &app.settings_state.available_models;
+    let current = &app.settings_state.model;
+
+    if models.is_empty() {
+        f.render_widget(
+            Paragraph::new("No models available. Try changing provider first.")
+                .style(Style::default().fg(OUTPUT_FG)),
+            area.inner(Margin { vertical: 3, horizontal: 4 }),
         );
-
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Green))
-            .style(Style::default().bg(Color::Black).fg(Color::White));
-        f.render_widget(block, dropdown_rect);
-
-        for (i, model) in state.available_models.iter().enumerate() {
-            if i >= 6 {
+    } else {
+        for (i, model) in models.iter().enumerate() {
+            let y = inner.y + i as u16;
+            if y >= inner.y + inner.height {
                 break;
             }
-            let is_selected = i == state.dropdown_cursor;
-            let style = if is_selected {
-                Style::default().bg(Color::Green).fg(Color::Black)
-            } else {
-                Style::default().fg(Color::White)
-            };
+            let selected_mark = if model == current { " ✓" } else { "" };
+            let prefix = cursor_prefix(cursor == i);
+            let display = format!("{}{}{}", prefix, model, selected_mark);
             f.render_widget(
-                Paragraph::new(model.as_str()).style(style),
-                Rect::new(
-                    dropdown_rect.x + 1,
-                    dropdown_rect.y + i as u16,
-                    dropdown_rect.right() - 1,
-                    dropdown_rect.y + i as u16 + 1,
-                ),
+                Paragraph::new(display).style(highlight_style(cursor == i)),
+                Rect::new(inner.x, y, inner.width, 1),
             );
         }
     }
+
+    let hint = " Esc: Back   Enter: Select   ↑↓: Navigate ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
+}
+
+fn render_baseurl_page(f: &mut ratatui::Frame, app: &App) {
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Edit Base URL ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
+
+    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let url = &app.settings_state.base_url;
+
+    f.render_widget(
+        Paragraph::new("Base URL:")
+            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let input_y = inner.y + 2;
+    let cursor_x = inner.x + 1 + url.len() as u16;
+    f.render_widget(
+        Paragraph::new(format!(" {}", url))
+            .style(Style::default().fg(OUTPUT_FG).bg(Color::Rgb(30, 30, 30))),
+        Rect::new(inner.x, input_y, inner.width.min(80), 3),
+    );
+
+    let display_with_cursor = format!(" {}|", url);
+    if cursor_x < inner.x + inner.width.min(80) {
+        f.render_widget(
+            Paragraph::new(display_with_cursor)
+                .style(Style::default().fg(Color::Green).bg(Color::Rgb(30, 30, 30))),
+            Rect::new(inner.x, input_y, inner.width.min(80), 1),
+        );
+    }
+
+    let hint = " Esc: Back   Enter: Confirm   Type to edit ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
+}
+
+fn render_apikey_page(f: &mut ratatui::Frame, app: &App) {
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Edit API Key ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
+
+    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let key = &app.settings_state.api_key;
+
+    let display = if key.is_empty() {
+        "(empty)"
+    } else {
+        "••••••••••••••"
+    };
+
+    f.render_widget(
+        Paragraph::new("API Key:")
+            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Rect::new(inner.x, inner.y, inner.width, 1),
+    );
+
+    let input_y = inner.y + 2;
+    f.render_widget(
+        Paragraph::new(format!(" {}", display))
+            .style(Style::default().fg(OUTPUT_FG).bg(Color::Rgb(30, 30, 30))),
+        Rect::new(inner.x, input_y, inner.width.min(80), 1),
+    );
+
+    let hint = " Esc: Back   Enter: Confirm   Type to edit (key is hidden) ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
+}
+
+fn render_enable_page(f: &mut ratatui::Frame, app: &App) {
+    let area = f.area();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Green))
+        .title(" Enable AI ")
+        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
+    f.render_widget(block, area);
+
+    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let cursor = app.settings_cursor;
+    let enabled = app.settings_state.enabled;
+
+    let options = ["Yes — AI features enabled", "No  — AI features disabled"];
+    let values = [true, false];
+
+    for (i, label) in options.iter().enumerate() {
+        let y = inner.y + 2 + i as u16;
+        if y >= inner.y + inner.height {
+            break;
+        }
+        let selected_mark = if values[i] == enabled { " ✓" } else { "" };
+        let prefix = cursor_prefix(cursor == i);
+        let display = format!("{}{}{}", prefix, label, selected_mark);
+        f.render_widget(
+            Paragraph::new(display).style(highlight_style(cursor == i)),
+            Rect::new(inner.x, y, inner.width, 1),
+        );
+    }
+
+    let hint = " Esc: Back   Enter: Toggle ";
+    let hint_y = area.height.saturating_sub(1);
+    f.render_widget(
+        Paragraph::new(hint)
+            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Rect::new(0, hint_y, area.width, 1),
+    );
 }

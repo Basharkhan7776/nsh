@@ -48,9 +48,28 @@ impl SettingsField {
             _ => SettingsField::Provider,
         }
     }
+}
 
-    pub fn is_dropdown(&self) -> bool {
-        matches!(self, SettingsField::Provider | SettingsField::Model)
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    Home,
+    Provider,
+    Model,
+    BaseUrl,
+    ApiKey,
+    Enable,
+}
+
+impl SettingsPage {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::Home => " AI Settings ",
+            Self::Provider => " Provider ",
+            Self::Model => " Model ",
+            Self::BaseUrl => " Base URL ",
+            Self::ApiKey => " API Key ",
+            Self::Enable => " Enable ",
+        }
     }
 }
 
@@ -63,11 +82,6 @@ pub struct SettingsState {
     pub api_key_original: String,
     pub enabled: bool,
     pub available_models: Vec<String>,
-    pub show_provider_dropdown: bool,
-    pub show_model_dropdown: bool,
-    pub dropdown_cursor: usize,
-    pub editing_api_key: bool,
-    pub editing_base_url: bool,
 }
 
 impl Default for SettingsState {
@@ -80,11 +94,6 @@ impl Default for SettingsState {
             api_key_original: String::new(),
             enabled: false,
             available_models: vec!["llama3.2:latest".to_string()],
-            show_provider_dropdown: false,
-            show_model_dropdown: false,
-            dropdown_cursor: 0,
-            editing_api_key: false,
-            editing_base_url: false,
         }
     }
 }
@@ -103,10 +112,11 @@ pub struct App {
     pub saved_input: String,                        // Temporary storage for history navigation
     pub history_index: Option<usize>,               // Current position in command history
     pub kill_ring: Vec<String>,                     // Kill ring for Ctrl+W / Ctrl+Y
-    pub show_settings: bool,                        // Settings dialog shown
-    pub settings_state: SettingsState,              // Settings dialog state
-    pub settings_cursor: usize,                     // Settings field cursor
+    pub show_settings: bool,                        // Settings shown
+    pub settings_state: SettingsState,              // Settings state
+    pub settings_cursor: usize,                     // Settings field cursor (Home page index)
     pub settings_input: String,                     // Input buffer for editing fields
+    pub settings_nav: Vec<SettingsPage>,            // Navigation stack
 }
 
 impl App {
@@ -129,6 +139,7 @@ impl App {
             settings_state: SettingsState::default(),
             settings_cursor: 0,
             settings_input: String::new(),
+            settings_nav: Vec::new(),
         }
     }
 
@@ -335,50 +346,40 @@ impl App {
         }
     }
 
-    pub fn settings_field(&self) -> SettingsField {
-        SettingsField::from_index(self.settings_cursor)
+    pub fn current_settings_page(&self) -> SettingsPage {
+        self.settings_nav.last().copied().unwrap_or(SettingsPage::Home)
+    }
+
+    pub fn settings_push(&mut self, page: SettingsPage) {
+        self.settings_nav.push(page);
+        self.settings_cursor = 0;
+    }
+
+    pub fn settings_pop(&mut self) {
+        self.settings_nav.pop();
+        self.settings_cursor = 0;
+    }
+
+    pub fn settings_page_item_count(&self) -> usize {
+        match self.current_settings_page() {
+            SettingsPage::Home => SettingsField::count(),
+            SettingsPage::Provider => 4,
+            SettingsPage::Model => self.settings_state.available_models.len(),
+            SettingsPage::Enable => 2,
+            _ => 0,
+        }
     }
 
     pub fn settings_move_up(&mut self) {
-        if self.settings_state.show_provider_dropdown || self.settings_state.show_model_dropdown {
-            if self.settings_state.dropdown_cursor > 0 {
-                self.settings_state.dropdown_cursor -= 1;
-            }
-        } else {
-            if self.settings_cursor > 0 {
-                self.settings_cursor -= 1;
-            }
+        if self.settings_cursor > 0 {
+            self.settings_cursor -= 1;
         }
     }
 
     pub fn settings_move_down(&mut self) {
-        if self.settings_state.show_provider_dropdown || self.settings_state.show_model_dropdown {
-            let max = if self.settings_state.show_provider_dropdown {
-                ProviderType::count() - 1
-            } else {
-                self.settings_state.available_models.len().saturating_sub(1)
-            };
-            if self.settings_state.dropdown_cursor < max {
-                self.settings_state.dropdown_cursor += 1;
-            }
-        } else {
-            if self.settings_cursor < SettingsField::count() - 1 {
-                self.settings_cursor += 1;
-            }
-        }
-    }
-
-    pub fn close_dropdowns(&mut self) {
-        self.settings_state.show_provider_dropdown = false;
-        self.settings_state.show_model_dropdown = false;
-        self.settings_state.dropdown_cursor = 0;
-    }
-
-    pub fn settings_mask_api_key(key: &str) -> String {
-        if key.is_empty() {
-            "(empty)".to_string()
-        } else {
-            "••••••••••••••".to_string()
+        let max = self.settings_page_item_count();
+        if max > 0 && self.settings_cursor + 1 < max {
+            self.settings_cursor += 1;
         }
     }
 }

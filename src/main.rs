@@ -2,7 +2,10 @@
 // Terminal-based shell with TUI, autocompletion, and command history
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseEventKind},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -10,7 +13,7 @@ use nsh::{
     ai::ProviderType,
     fetch_models,
     keybindings::{execute_action, get_action, Action},
-    modules::state::SettingsField,
+    modules::state::{SettingsField, SettingsPage},
     render, App, Entry, EntryType, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
     SCROLL_STEP,
 };
@@ -104,6 +107,7 @@ fn main() -> std::io::Result<()> {
                                         app.show_settings = true;
                                         app.settings_cursor = 0;
                                         app.settings_input.clear();
+                                        app.settings_nav.clear();
 
                                         // Fetch models for current provider
                                         let base_url = app.settings_state.base_url.clone();
@@ -144,6 +148,7 @@ fn main() -> std::io::Result<()> {
                                                 app.show_settings = true;
                                                 app.settings_cursor = 0;
                                                 app.settings_input.clear();
+                                                app.settings_nav.clear();
 
                                                 let base_url = app.settings_state.base_url.clone();
                                                 let provider = app.settings_state.provider;
@@ -316,6 +321,31 @@ fn main() -> std::io::Result<()> {
 
                             // Mouse input handling
                             Event::Mouse(mouse) => {
+                                // Settings mode: left click selects item
+                                if app.show_settings
+                                    && mouse.kind
+                                        == MouseEventKind::Down(MouseButton::Left)
+                                {
+                                    let page = app.current_settings_page();
+                                    let y_offset: u16 = match page {
+                                        SettingsPage::Home
+                                        | SettingsPage::Provider
+                                        | SettingsPage::Model => 2,
+                                        SettingsPage::Enable => 4,
+                                        _ => 0,
+                                    };
+                                    if y_offset > 0
+                                        && let Some(row) =
+                                            mouse.row.checked_sub(y_offset)
+                                    {
+                                        let idx = row as usize;
+                                        let count = app.settings_page_item_count();
+                                        if count > 0 && idx < count {
+                                            app.settings_cursor = idx;
+                                            settings_handle_enter(&mut app);
+                                        }
+                                    }
+                                }
                                 if mouse.kind == MouseEventKind::ScrollUp {
                                     if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_up();
@@ -363,117 +393,132 @@ fn handle_settings_input(
     _modifiers: crossterm::event::KeyModifiers,
 ) {
     use crossterm::event::KeyCode;
+    use SettingsPage::*;
 
-    let state = &mut app.settings_state;
-    let is_dropdown_open = state.show_provider_dropdown || state.show_model_dropdown;
-    let field = SettingsField::from_index(app.settings_cursor);
+    let page = app.current_settings_page();
 
     match key_code {
         KeyCode::Esc => {
-            app.show_settings = false;
-            app.close_dropdowns();
-        }
-        KeyCode::Up => {
-            if is_dropdown_open {
-                if state.dropdown_cursor > 0 {
-                    state.dropdown_cursor -= 1;
-                }
-            } else {
-                app.settings_move_up();
+            app.settings_pop();
+            if app.settings_nav.is_empty() {
+                app.show_settings = false;
             }
         }
-        KeyCode::Down => {
-            if is_dropdown_open {
-                let max = if state.show_provider_dropdown {
-                    ProviderType::count() - 1
-                } else {
-                    state.available_models.len().saturating_sub(1)
-                };
-                if state.dropdown_cursor < max {
-                    state.dropdown_cursor += 1;
-                }
-            } else {
-                app.settings_move_down();
+        KeyCode::Up => app.settings_move_up(),
+        KeyCode::Down => app.settings_move_down(),
+        KeyCode::Enter => settings_handle_enter(app),
+        KeyCode::Char(c) => match page {
+            BaseUrl => {
+                app.settings_state.base_url.push(c);
             }
-        }
-        KeyCode::Enter => {
-            if is_dropdown_open {
-                if state.show_provider_dropdown {
-                    state.provider = ProviderType::from_index(state.dropdown_cursor);
-                    state.base_url = state.provider.default_url().to_string();
-                    state.model = "".to_string();
-                    state.show_provider_dropdown = false;
-                    state.dropdown_cursor = 0;
+            ApiKey => {
+                app.settings_state.api_key.push(c);
+                app.settings_state.api_key_original = app.settings_state.api_key.clone();
+            }
+            _ => {}
+        },
+        KeyCode::Backspace => match page {
+            BaseUrl => {
+                app.settings_state.base_url.pop();
+            }
+            ApiKey => {
+                app.settings_state.api_key.pop();
+                app.settings_state.api_key_original = app.settings_state.api_key.clone();
+            }
+            _ => {}
+        },
+        _ => {}
+    }
+}
 
-                    // Fetch models for new provider
-                    let rt = tokio::runtime::Runtime::new().unwrap();
-                    state.available_models =
-                        rt.block_on(fetch_models(state.provider, &state.base_url));
-                    if !state.available_models.is_empty() {
-                        state.model = state.available_models[0].clone();
-                    }
-                } else if state.show_model_dropdown {
-                    if let Some(model) = state.available_models.get(state.dropdown_cursor) {
-                        state.model = model.clone();
-                    }
-                    state.show_model_dropdown = false;
-                    state.dropdown_cursor = 0;
+fn settings_handle_enter(app: &mut App) {
+    use SettingsPage::*;
+
+    let page = app.current_settings_page();
+    match page {
+        Home => {
+            let field = SettingsField::from_index(app.settings_cursor);
+            match field {
+                SettingsField::Provider => {
+                    app.settings_push(Provider);
+                    app.settings_cursor = match app.settings_state.provider {
+                        ProviderType::Ollama => 0,
+                        ProviderType::OpenAI => 1,
+                        ProviderType::Anthropic => 2,
+                        ProviderType::OpenAICompatible => 3,
+                    };
                 }
-            } else {
-                match field {
-                    SettingsField::Provider => {
-                        state.show_provider_dropdown = true;
-                        state.dropdown_cursor = match state.provider {
-                            ProviderType::Ollama => 0,
-                            ProviderType::OpenAI => 1,
-                            ProviderType::Anthropic => 2,
-                            ProviderType::OpenAICompatible => 3,
-                        };
-                    }
-                    SettingsField::Model => {
-                        if !state.available_models.is_empty() {
-                            state.show_model_dropdown = true;
-                            if let Some(idx) = state
-                                .available_models
-                                .iter()
-                                .position(|m| m == &state.model)
-                            {
-                                state.dropdown_cursor = idx;
-                            } else {
-                                state.dropdown_cursor = 0;
-                            }
+                SettingsField::Model => {
+                    if !app.settings_state.available_models.is_empty() {
+                        app.settings_push(Model);
+                        if let Some(idx) = app
+                            .settings_state
+                            .available_models
+                            .iter()
+                            .position(|m| m == &app.settings_state.model)
+                        {
+                            app.settings_cursor = idx;
+                        } else {
+                            app.settings_cursor = 0;
                         }
                     }
-                    SettingsField::Save => {
-                        save_settings_state(state);
-                        app.show_settings = false;
-                    }
-                    SettingsField::Cancel => {
-                        app.show_settings = false;
-                    }
-                    SettingsField::Enable => {
-                        state.enabled = !state.enabled;
-                    }
-                    _ => {}
+                }
+                SettingsField::BaseUrl => {
+                    app.settings_push(BaseUrl);
+                }
+                SettingsField::ApiKey => {
+                    app.settings_push(ApiKey);
+                }
+                SettingsField::Enable => {
+                    app.settings_push(Enable);
+                    app.settings_cursor = if app.settings_state.enabled { 0 } else { 1 };
+                }
+                SettingsField::Save => {
+                    save_settings_state(&app.settings_state);
+                    app.show_settings = false;
+                }
+                SettingsField::Cancel => {
+                    app.show_settings = false;
                 }
             }
         }
-        KeyCode::Char(c) => {
-            if field == SettingsField::BaseUrl {
-                state.base_url.push(c);
-            } else if field == SettingsField::ApiKey {
-                state.api_key.push(c);
-                state.api_key_original = state.api_key.clone();
+        Provider => {
+            let provider = match app.settings_cursor {
+                0 => ProviderType::Ollama,
+                1 => ProviderType::OpenAI,
+                2 => ProviderType::Anthropic,
+                3 => ProviderType::OpenAICompatible,
+                _ => return,
+            };
+            app.settings_state.provider = provider;
+            app.settings_state.base_url = provider.default_url().to_string();
+            app.settings_state.model = String::new();
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            app.settings_state.available_models =
+                rt.block_on(fetch_models(provider, &app.settings_state.base_url));
+            if !app.settings_state.available_models.is_empty() {
+                app.settings_state.model = app.settings_state.available_models[0].clone();
             }
+
+            app.settings_pop();
         }
-        KeyCode::Backspace => {
-            if field == SettingsField::BaseUrl {
-                state.base_url.pop();
-            } else if field == SettingsField::ApiKey {
-                state.api_key.pop();
-                state.api_key_original = state.api_key.clone();
+        Model => {
+            if let Some(model) = app.settings_state.available_models.get(app.settings_cursor) {
+                app.settings_state.model = model.clone();
             }
+            app.settings_pop();
         }
-        _ => {}
+        BaseUrl => {
+            app.settings_pop();
+        }
+        ApiKey => {
+            app.settings_state.api_key_original = app.settings_state.api_key.clone();
+            app.settings_pop();
+        }
+        Enable => {
+            app.settings_state.enabled = app.settings_cursor == 0;
+            app.settings_pop();
+        }
     }
 }

@@ -23,7 +23,7 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
     let mut parts = input.split_whitespace();
     let program = match parts.next() {
-        Some(p) => p,
+        Some(p) => p.strip_prefix('/').unwrap_or(p),
         None => return vec![],
     };
     let args: Vec<&str> = parts.collect();
