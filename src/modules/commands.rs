@@ -23,7 +23,7 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
     let mut parts = input.split_whitespace();
     let program = match parts.next() {
-        Some(p) => p.strip_prefix('/').unwrap_or(p),
+        Some(p) => p,
         None => return vec![],
     };
     let args: Vec<&str> = parts.collect();
@@ -46,25 +46,25 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
         "clear" => return vec!["__CLEAR__".to_string()],
 
-        "help" => {
+        "/help" => {
             return vec![
                 "Available commands:".to_string(),
-                "  ask <question>  - Ask AI (future)".to_string(),
-                "  do <task>       - Execute task (future)".to_string(),
-                "  plan <goal>     - Plan goal (future)".to_string(),
-                "  build <project> - Build project (future)".to_string(),
-                "  settings        - Open AI settings".to_string(),
-                "  cd <dir>        - Change directory".to_string(),
-                "  clear           - Clear screen".to_string(),
-                "  exit / quit     - Exit shell".to_string(),
+                "  /ask <question>  - Ask AI (future)".to_string(),
+                "  /do <task>       - Execute task (future)".to_string(),
+                "  /plan <goal>     - Plan goal (future)".to_string(),
+                "  /build <project> - Build project (future)".to_string(),
+                "  /settings        - Open AI settings".to_string(),
+                "  cd <dir>         - Change directory".to_string(),
+                "  clear            - Clear screen".to_string(),
+                "  exit / quit      - Exit shell".to_string(),
             ];
         }
 
-        "settings" => {
+        "/settings" => {
             return vec!["__SETTINGS__".to_string()];
         }
 
-        "ask" | "do" | "plan" | "build" => {
+        "/ask" | "/do" | "/plan" | "/build" => {
             return vec![format!(
                 "{}: This feature will be implemented in a future update.",
                 program

@@ -75,6 +75,14 @@ pub fn update_suggestions(app: &mut App) {
         }
         suggestions.sort_by(|a, b| a.1.cmp(&b.1));
     } else {
+        // Built-in slash commands
+        let builtins = ["/ask", "/do", "/plan", "/build", "/settings", "/help"];
+        for cmd in builtins {
+            if cmd.starts_with(&input_lower) {
+                suggestions.push((cmd.to_string(), cmd.to_string()));
+            }
+        }
+
         // Command completion from PATH
         for cmd in PATH_COMMANDS.iter() {
             if cmd.to_lowercase().starts_with(&input_lower) {

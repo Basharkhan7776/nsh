@@ -117,7 +117,12 @@ fn render_shell(f: &mut ratatui::Frame, app: &App) {
         let after_cursor = &app.current_input[app.cursor_position..];
         format!("{}{}|{}", PROMPT_TEXT, before_cursor, after_cursor)
     };
-    let input_widget = Paragraph::new(input_with_cursor.as_str()).style(input_style);
+    let input_block = Block::default()
+        .style(input_style)
+        .padding(ratatui::widgets::Padding::new(0, 0, 1, 1));
+    let input_widget = Paragraph::new(input_with_cursor.as_str())
+        .style(input_style)
+        .block(input_block);
     f.render_widget(input_widget, input_area);
 
     if app.show_suggestions && !app.current_suggestions.is_empty() {
