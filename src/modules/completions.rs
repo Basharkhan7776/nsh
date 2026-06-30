@@ -75,8 +75,15 @@ pub fn update_suggestions(app: &mut App) {
         }
         suggestions.sort_by(|a, b| a.1.cmp(&b.1));
     } else {
-        // Built-in slash commands
-        let builtins = ["/ask", "/do", "/plan", "/build", "/settings", "/help"];
+        // Built-in AI + slash commands (bare + slashed)
+        let builtins = [
+            "ask", "/ask",
+            "do", "/do",
+            "plan", "/plan",
+            "build", "/build",
+            "index", "/index",
+            "/settings", "/help",
+        ];
         for cmd in builtins {
             if cmd.starts_with(&input_lower) {
                 suggestions.push((cmd.to_string(), cmd.to_string()));

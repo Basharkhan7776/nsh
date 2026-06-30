@@ -1,3 +1,4 @@
+use crate::ai::AiConfig;
 use crate::storage::{LocalStorage, VectorStore};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -26,24 +27,52 @@ pub struct Document {
 pub struct RagEngine {
     vector_store: VectorStore,
     embed_model: String,
+    embed_base_url: String, // resolved, e.g. http://localhost:11434
 }
 
 impl RagEngine {
-    pub async fn new(storage: &LocalStorage, embed_model: &str) -> Result<Self, RagError> {
-        let vector_store = VectorStore::from_embedded(
-            storage.config_dir(),
-            "nsh_rag",
-        )
-        .await
-        .map_err(|e| RagError::Vector(e.to_string()))?;
+    /// Preferred constructor: derives embed base from AiConfig (for Ollama) + rag config.
+    pub async fn new_from_config(
+        storage: &LocalStorage,
+        ai_config: &AiConfig,
+        embed_model: Option<String>,
+    ) -> Result<Self, RagError> {
+        let rag_dir = storage.config_dir();
+        let model = embed_model
+            .or_else(|| ai_config.model.clone().into())
+            .unwrap_or_else(|| "nomic-embed-text".to_string()); // sensible default if not set
+
+        // Derive base for embeddings. Prefer ai base_url for Ollama-family.
+        let base = match ai_config.provider {
+            crate::ai::ProviderType::Ollama | crate::ai::ProviderType::OpenAICompatible => {
+                // strip trailing /v1 if present
+                ai_config.base_url.trim_end_matches('/').trim_end_matches("/v1").to_string()
+            }
+            _ => "http://localhost:11434".to_string(),
+        };
+
+        let vector_store = VectorStore::from_embedded(rag_dir, "nsh_rag")
+            .await
+            .map_err(|e| RagError::Vector(e.to_string()))?;
 
         Ok(Self {
             vector_store,
-            embed_model: embed_model.to_string(),
+            embed_model: model,
+            embed_base_url: base,
         })
     }
 
-    pub async fn index_document(&self, doc: Document) -> Result<(), RagError> {
+    /// Back-compat simple constructor (uses defaults).
+    pub async fn new(storage: &LocalStorage, embed_model: &str) -> Result<Self, RagError> {
+        let default_ai = AiConfig::default();
+        Self::new_from_config(storage, &default_ai, Some(embed_model.to_string())).await
+    }
+
+    fn resolve_embed_url(&self) -> String {
+        format!("{}/api/embeddings", self.embed_base_url.trim_end_matches('/'))
+    }
+
+    pub async fn index_document(&mut self, doc: Document) -> Result<(), RagError> {
         let vector = self.embed_text(&doc.content).await?;
 
         let payload: HashMap<String, serde_json::Value> = serde_json::from_value(serde_json::json!({
@@ -78,7 +107,7 @@ impl RagEngine {
                 
                 Some(RetrievedDocument {
                     id,
-                    content,
+                    content: content.trim_matches('"').to_string(), // clean serde string form
                     source,
                     score: r.score,
                 })
@@ -86,11 +115,27 @@ impl RagEngine {
             .collect())
     }
 
+    /// Convenience for agent: returns a compact context string.
+    pub async fn retrieve_context(&self, query: &str, k: usize) -> String {
+        match self.search(query, k).await {
+            Ok(docs) if !docs.is_empty() => {
+                let mut out = String::from("Relevant context from your indexed documents:\n");
+                for (i, d) in docs.iter().enumerate() {
+                    out.push_str(&format!("---\n[{}]\n{}\n", d.source, d.content));
+                    if i >= 2 { break; }
+                }
+                out
+            }
+            _ => String::new(),
+        }
+    }
+
     async fn embed_text(&self, text: &str) -> Result<Vec<f32>, RagError> {
         let client = reqwest::Client::new();
-        
+        let url = self.resolve_embed_url();
+
         let response = client
-            .post(format!("http://localhost:11434/api/embeddings"))
+            .post(&url)
             .json(&serde_json::json!({
                 "model": self.embed_model,
                 "prompt": text

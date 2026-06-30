@@ -10,10 +10,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use nsh::{
-    ai::ProviderType,
+    ai::{agent::{run_ai_command, AiCommand}, ProviderType},
     fetch_models,
     keybindings::{execute_action, get_action, Action},
     modules::state::{SettingsField, SettingsPage},
+    rag::RagEngine,
     render, App, Entry, EntryType, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
     SCROLL_STEP,
 };
@@ -67,7 +68,7 @@ fn main() -> std::io::Result<()> {
             "Welcome to nsh - AI-Powered Shell".to_string(),
             "Type 'help' for commands".to_string(),
             "Use Tab for autocomplete, Up/Down for history".to_string(),
-            "Type 'settings' or press Ctrl+, for AI settings".to_string(),
+            "Type 'settings' or Ctrl+, for AI provider/model.  ask / do / plan / build + RAG ready.".to_string(),
         ],
         cwd: "~".to_string(),
     });
@@ -142,27 +143,103 @@ fn main() -> std::io::Result<()> {
                                                 content: vec![input.clone()],
                                                 cwd: cwd.clone(),
                                             });
-                                            let output = nsh::execute_command(&input);
-                                            if output.iter().any(|s| s == "__SETTINGS__") {
-                                                app.settings_state = load_settings_state();
-                                                app.show_settings = true;
-                                                app.settings_cursor = 0;
-                                                app.settings_input.clear();
-                                                app.settings_nav.clear();
 
-                                                let base_url = app.settings_state.base_url.clone();
-                                                let provider = app.settings_state.provider;
+                                            // AI command detection (bare and / forms) — use fresh config for live settings updates
+                                            let trimmed = input.trim();
+                                            let first = trimmed.split_whitespace().next().unwrap_or("");
+                                            let cmd_word = first.trim_start_matches('/');
+                                            if cmd_word == "index" || cmd_word == "/index" {
+                                                // Lightweight RAG index (no full agent loop)
+                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let ai_cfg = storage.load_or_create_config().ai;
+                                                let path_arg = trimmed.split_once(char::is_whitespace)
+                                                    .map(|(_, q)| q.trim()).unwrap_or(".");
                                                 let rt = tokio::runtime::Runtime::new().unwrap();
-                                                app.settings_state.available_models =
-                                                    rt.block_on(fetch_models(provider, &base_url));
-                                            } else if output.iter().any(|s| s == "__CLEAR__") {
-                                                app.clear();
-                                            } else if !output.is_empty() {
+                                                let idx_res = rt.block_on(async {
+                                                    match RagEngine::new_from_config(&storage, &ai_cfg, None).await {
+                                                        Ok(mut engine) => {
+                                                            // naive walk using same patterns as tools
+                                                            let indexed = index_directory_simple(path_arg, &mut engine).await;
+                                                            Ok(format!("Indexed {} documents into RAG from {}", indexed, path_arg))
+                                                        }
+                                                        Err(e) => Err(format!("RAG init failed: {}", e)),
+                                                    }
+                                                });
+                                                let out = match idx_res {
+                                                    Ok(msg) => vec![msg],
+                                                    Err(e) => vec![e],
+                                                };
+                                                app.add_entry(Entry { entry_type: EntryType::Output, content: out, cwd: String::new() });
+                                            } else if let Some(ai_cmd) = AiCommand::from_str(cmd_word) {
+                                                // Extract query = everything after first token
+                                                let query = trimmed
+                                                    .split_once(char::is_whitespace)
+                                                    .map(|(_, q)| q.trim().to_string())
+                                                    .unwrap_or_default();
+
+                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let ai_cfg = storage.load_or_create_config().ai;
+
+                                                // Show a thinking indicator
                                                 app.add_entry(Entry {
-                                                    entry_type: EntryType::Output,
-                                                    content: output,
+                                                    entry_type: EntryType::System,
+                                                    content: vec![format!(
+                                                        "🤖 {} ({} / {}) ...",
+                                                        match ai_cmd {
+                                                            AiCommand::Ask => "Asking",
+                                                            AiCommand::Do => "Doing",
+                                                            AiCommand::Plan => "Planning",
+                                                            AiCommand::Build => "Building",
+                                                        },
+                                                        ai_cfg.provider,
+                                                        if ai_cfg.model.is_empty() { "default" } else { &ai_cfg.model }
+                                                    )],
                                                     cwd: String::new(),
                                                 });
+
+                                                let rt = tokio::runtime::Runtime::new().unwrap();
+                                                let ai_out = rt.block_on(run_ai_command(
+                                                    ai_cmd,
+                                                    &query,
+                                                    ai_cfg,
+                                                    &storage,
+                                                ));
+
+                                                let output_lines = match ai_out {
+                                                    Ok(lines) => lines,
+                                                    Err(e) => vec![format!("AI error: {}", e)],
+                                                };
+
+                                                if !output_lines.is_empty() {
+                                                    app.add_entry(Entry {
+                                                        entry_type: EntryType::Output,
+                                                        content: output_lines,
+                                                        cwd: String::new(),
+                                                    });
+                                                }
+                                            } else {
+                                                let output = nsh::execute_command(&input);
+                                                if output.iter().any(|s| s == "__SETTINGS__") {
+                                                    app.settings_state = load_settings_state();
+                                                    app.show_settings = true;
+                                                    app.settings_cursor = 0;
+                                                    app.settings_input.clear();
+                                                    app.settings_nav.clear();
+
+                                                    let base_url = app.settings_state.base_url.clone();
+                                                    let provider = app.settings_state.provider;
+                                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                                    app.settings_state.available_models =
+                                                        rt.block_on(fetch_models(provider, &base_url));
+                                                } else if output.iter().any(|s| s == "__CLEAR__") {
+                                                    app.clear();
+                                                } else if !output.is_empty() {
+                                                    app.add_entry(Entry {
+                                                        entry_type: EntryType::Output,
+                                                        content: output,
+                                                        cwd: String::new(),
+                                                    });
+                                                }
                                             }
                                         }
                                         app.current_input.clear();
@@ -521,4 +598,51 @@ fn settings_handle_enter(app: &mut App) {
             app.settings_pop();
         }
     }
+}
+
+// Simple non-recursive index helper for /index (reuses terminal read logic style).
+async fn index_directory_simple(path: &str, engine: &mut RagEngine) -> usize {
+    use std::fs;
+    use std::path::Path;
+    let root = Path::new(path);
+    if !root.exists() {
+        return 0;
+    }
+    let mut count = 0usize;
+    let exts = ["rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "js", "ts", "go", "sh"];
+
+    let walk = |dir: &Path| -> Vec<std::path::PathBuf> {
+        let mut out = vec![];
+        if let Ok(entries) = fs::read_dir(dir) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if p.is_file() {
+                    if let Some(ext) = p.extension().and_then(|s| s.to_str()) {
+                        if exts.contains(&ext.to_lowercase().as_str()) {
+                            out.push(p);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    let files = if root.is_file() { vec![root.to_path_buf()] } else { walk(root) };
+
+    for f in files.into_iter().take(50) {  // limit for v1
+        if let Ok(content) = fs::read_to_string(&f) {
+            let id = f.display().to_string();
+            let doc = nsh::rag::Document {
+                id: id.clone(),
+                content,
+                source: id,
+                metadata: None,
+            };
+            if engine.index_document(doc).await.is_ok() {
+                count += 1;
+            }
+        }
+    }
+    count
 }

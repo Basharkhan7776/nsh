@@ -8,6 +8,7 @@ pub mod rag;
 
 // Re-export public types and functions
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
+pub use ai::agent::{run_ai_command, AiCommand};
 pub use modules::commands::{execute_command, shorten_cwd};
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{
@@ -18,5 +19,6 @@ pub use modules::config::{
 pub use modules::keybindings;
 pub use modules::render::render;
 pub use modules::state::{App, Entry, EntryType};
+pub use rag::{Document, RagEngine, RagError};
 pub use storage::{LocalStorage, NshConfig, StorageError, VectorError, VectorStore};
-pub use tools::{cat, execute_tool, get_tool_definitions, grep, ls, web_search};
+pub use tools::{cat, copy_path, delete_path, execute_tool, get_tool_definitions, grep, ls, mkdir, move_path, web_search, write_file};

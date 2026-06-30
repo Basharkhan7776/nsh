@@ -49,10 +49,11 @@ pub fn execute_command(input: &str) -> Vec<String> {
         "/help" => {
             return vec![
                 "Available commands:".to_string(),
-                "  /ask <question>  - Ask AI (future)".to_string(),
-                "  /do <task>       - Execute task (future)".to_string(),
-                "  /plan <goal>     - Plan goal (future)".to_string(),
-                "  /build <project> - Build project (future)".to_string(),
+                "  ask <q> | /ask   - Ask AI anything (uses current model + RAG)".to_string(),
+                "  do <task> | /do  - Small agentic terminal tasks (cp/mv/rm/write)".to_string(),
+                "  plan <goal> | /plan - Generate a plan".to_string(),
+                "  build <spec> | /build - Agentic build: explore, code, create files".to_string(),
+                "  /index <path>    - Index files into RAG".to_string(),
                 "  /settings        - Open AI settings".to_string(),
                 "  cd <dir>         - Change directory".to_string(),
                 "  clear            - Clear screen".to_string(),
@@ -64,9 +65,11 @@ pub fn execute_command(input: &str) -> Vec<String> {
             return vec!["__SETTINGS__".to_string()];
         }
 
-        "/ask" | "/do" | "/plan" | "/build" => {
+        "/ask" | "ask" | "/do" | "do" | "/plan" | "plan" | "/build" | "build" | "/index" | "index" => {
+            // These are handled in main.rs with full AI + tool loop (fresh config on every use).
+            // If we reach here it means the input was passed through the legacy path.
             return vec![format!(
-                "{}: This feature will be implemented in a future update.",
+                "{}: AI command routing active (pass full input to AI handler).",
                 program
             )];
         }

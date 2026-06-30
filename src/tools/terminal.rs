@@ -128,3 +128,84 @@ impl std::fmt::Display for FileEntry {
         }
     }
 }
+
+// --- Write / mutate tools for agentic do + build ---
+
+pub fn write_file(path: &str, content: &str) -> Result<(), TerminalError> {
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::write(p, content)?;
+    Ok(())
+}
+
+pub fn delete_path(path: &str) -> Result<(), TerminalError> {
+    let p = Path::new(path);
+    if !p.exists() {
+        return Err(TerminalError::NotFound(path.to_string()));
+    }
+    if p.is_dir() {
+        std::fs::remove_dir_all(p)?;
+    } else {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}
+
+pub fn copy_path(src: &str, dst: &str) -> Result<(), TerminalError> {
+    let s = Path::new(src);
+    let d = Path::new(dst);
+    if !s.exists() {
+        return Err(TerminalError::NotFound(src.to_string()));
+    }
+    if let Some(parent) = d.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if s.is_dir() {
+        // simple recursive copy for dirs (std has no built-in until recent)
+        copy_dir_all(s, d)?;
+    } else {
+        std::fs::copy(s, d)?;
+    }
+    Ok(())
+}
+
+pub fn move_path(src: &str, dst: &str) -> Result<(), TerminalError> {
+    let s = Path::new(src);
+    let d = Path::new(dst);
+    if !s.exists() {
+        return Err(TerminalError::NotFound(src.to_string()));
+    }
+    if let Some(parent) = d.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    std::fs::rename(s, d)?;
+    Ok(())
+}
+
+pub fn mkdir(path: &str) -> Result<(), TerminalError> {
+    std::fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), TerminalError> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let target = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_all(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
