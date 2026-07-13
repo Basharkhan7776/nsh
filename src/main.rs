@@ -7,18 +7,21 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nsh::{
-    ai::{agent::{run_ai_command, AiCommand}, ProviderType},
+    App, Entry, EntryType, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP, SCROLL_STEP,
+    ai::{
+        ProviderType,
+        agent::{AiCommand, run_ai_command},
+    },
     fetch_models,
-    keybindings::{execute_action, get_action, Action},
+    keybindings::{Action, execute_action, get_action},
     modules::state::{SettingsField, SettingsPage},
     rag::RagEngine,
-    render, App, Entry, EntryType, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
-    SCROLL_STEP,
+    render,
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::{Terminal, backend::CrosstermBackend};
 
 fn load_settings_state() -> nsh::modules::state::SettingsState {
     let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
@@ -146,14 +149,18 @@ fn main() -> std::io::Result<()> {
 
                                             // AI command detection (bare and / forms) — use fresh config for live settings updates
                                             let trimmed = input.trim();
-                                            let first = trimmed.split_whitespace().next().unwrap_or("");
+                                            let first =
+                                                trimmed.split_whitespace().next().unwrap_or("");
                                             let cmd_word = first.trim_start_matches('/');
                                             if cmd_word == "index" || cmd_word == "/index" {
                                                 // Lightweight RAG index (no full agent loop)
-                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let storage = LocalStorage::new()
+                                                    .unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
-                                                let path_arg = trimmed.split_once(char::is_whitespace)
-                                                    .map(|(_, q)| q.trim()).unwrap_or(".");
+                                                let path_arg = trimmed
+                                                    .split_once(char::is_whitespace)
+                                                    .map(|(_, q)| q.trim())
+                                                    .unwrap_or(".");
                                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                                 let idx_res = rt.block_on(async {
                                                     match RagEngine::new_from_config(&storage, &ai_cfg, None).await {
@@ -169,15 +176,22 @@ fn main() -> std::io::Result<()> {
                                                     Ok(msg) => vec![msg],
                                                     Err(e) => vec![e],
                                                 };
-                                                app.add_entry(Entry { entry_type: EntryType::Output, content: out, cwd: String::new() });
-                                            } else if let Some(ai_cmd) = AiCommand::from_str(cmd_word) {
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Output,
+                                                    content: out,
+                                                    cwd: String::new(),
+                                                });
+                                            } else if let Some(ai_cmd) =
+                                                AiCommand::from_str(cmd_word)
+                                            {
                                                 // Extract query = everything after first token
                                                 let query = trimmed
                                                     .split_once(char::is_whitespace)
                                                     .map(|(_, q)| q.trim().to_string())
                                                     .unwrap_or_default();
 
-                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let storage = LocalStorage::new()
+                                                    .unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
 
                                                 // Show a thinking indicator
@@ -192,17 +206,18 @@ fn main() -> std::io::Result<()> {
                                                             AiCommand::Build => "Building",
                                                         },
                                                         ai_cfg.provider,
-                                                        if ai_cfg.model.is_empty() { "default" } else { &ai_cfg.model }
+                                                        if ai_cfg.model.is_empty() {
+                                                            "default"
+                                                        } else {
+                                                            &ai_cfg.model
+                                                        }
                                                     )],
                                                     cwd: String::new(),
                                                 });
 
                                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                                 let ai_out = rt.block_on(run_ai_command(
-                                                    ai_cmd,
-                                                    &query,
-                                                    ai_cfg,
-                                                    &storage,
+                                                    ai_cmd, &query, ai_cfg, &storage,
                                                 ));
 
                                                 let output_lines = match ai_out {
@@ -226,11 +241,15 @@ fn main() -> std::io::Result<()> {
                                                     app.settings_input.clear();
                                                     app.settings_nav.clear();
 
-                                                    let base_url = app.settings_state.base_url.clone();
+                                                    let base_url =
+                                                        app.settings_state.base_url.clone();
                                                     let provider = app.settings_state.provider;
-                                                    let rt = tokio::runtime::Runtime::new().unwrap();
-                                                    app.settings_state.available_models =
-                                                        rt.block_on(fetch_models(provider, &base_url));
+                                                    let rt =
+                                                        tokio::runtime::Runtime::new().unwrap();
+                                                    app.settings_state.available_models = rt
+                                                        .block_on(fetch_models(
+                                                            provider, &base_url,
+                                                        ));
                                                 } else if output.iter().any(|s| s == "__CLEAR__") {
                                                     app.clear();
                                                 } else if !output.is_empty() {
@@ -400,8 +419,7 @@ fn main() -> std::io::Result<()> {
                             Event::Mouse(mouse) => {
                                 // Settings mode: left click selects item
                                 if app.show_settings
-                                    && mouse.kind
-                                        == MouseEventKind::Down(MouseButton::Left)
+                                    && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                                 {
                                     let page = app.current_settings_page();
                                     let y_offset: u16 = match page {
@@ -412,8 +430,7 @@ fn main() -> std::io::Result<()> {
                                         _ => 0,
                                     };
                                     if y_offset > 0
-                                        && let Some(row) =
-                                            mouse.row.checked_sub(y_offset)
+                                        && let Some(row) = mouse.row.checked_sub(y_offset)
                                     {
                                         let idx = row as usize;
                                         let count = app.settings_page_item_count();
@@ -469,8 +486,8 @@ fn handle_settings_input(
     key_code: crossterm::event::KeyCode,
     _modifiers: crossterm::event::KeyModifiers,
 ) {
-    use crossterm::event::KeyCode;
     use SettingsPage::*;
+    use crossterm::event::KeyCode;
 
     let page = app.current_settings_page();
 
@@ -609,7 +626,9 @@ async fn index_directory_simple(path: &str, engine: &mut RagEngine) -> usize {
         return 0;
     }
     let mut count = 0usize;
-    let exts = ["rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "js", "ts", "go", "sh"];
+    let exts = [
+        "rs", "toml", "md", "txt", "json", "yaml", "yml", "py", "js", "ts", "go", "sh",
+    ];
 
     let walk = |dir: &Path| -> Vec<std::path::PathBuf> {
         let mut out = vec![];
@@ -628,9 +647,14 @@ async fn index_directory_simple(path: &str, engine: &mut RagEngine) -> usize {
         out
     };
 
-    let files = if root.is_file() { vec![root.to_path_buf()] } else { walk(root) };
+    let files = if root.is_file() {
+        vec![root.to_path_buf()]
+    } else {
+        walk(root)
+    };
 
-    for f in files.into_iter().take(50) {  // limit for v1
+    for f in files.into_iter().take(50) {
+        // limit for v1
         if let Ok(content) = fs::read_to_string(&f) {
             let id = f.display().to_string();
             let doc = nsh::rag::Document {

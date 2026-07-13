@@ -347,7 +347,10 @@ impl App {
     }
 
     pub fn current_settings_page(&self) -> SettingsPage {
-        self.settings_nav.last().copied().unwrap_or(SettingsPage::Home)
+        self.settings_nav
+            .last()
+            .copied()
+            .unwrap_or(SettingsPage::Home)
     }
 
     pub fn settings_push(&mut self, page: SettingsPage) {

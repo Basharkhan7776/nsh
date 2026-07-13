@@ -5,12 +5,12 @@ use super::config::*;
 use super::state::{App, EntryType, SettingsPage};
 use crate::ai::ProviderType;
 use ratatui::{
+    Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, List, ListItem, Paragraph},
-    Terminal,
 };
 
 pub fn render(
@@ -205,11 +205,18 @@ fn render_home_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" AI Settings ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 2, horizontal: 3 });
+    let inner = area.inner(Margin {
+        vertical: 2,
+        horizontal: 3,
+    });
     let state = &app.settings_state;
     let cursor = app.settings_cursor;
 
@@ -271,8 +278,7 @@ fn render_home_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Close   Enter: Select   ↑↓: Navigate ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }
@@ -283,11 +289,18 @@ fn render_provider_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" Select Provider ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 2, horizontal: 4 });
+    let inner = area.inner(Margin {
+        vertical: 2,
+        horizontal: 4,
+    });
     let cursor = app.settings_cursor;
     let current = app.settings_state.provider;
 
@@ -315,8 +328,7 @@ fn render_provider_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Back   Enter: Select   ↑↓: Navigate ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }
@@ -327,11 +339,18 @@ fn render_model_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" Select Model ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 2, horizontal: 4 });
+    let inner = area.inner(Margin {
+        vertical: 2,
+        horizontal: 4,
+    });
     let cursor = app.settings_cursor;
     let models = &app.settings_state.available_models;
     let current = &app.settings_state.model;
@@ -340,7 +359,10 @@ fn render_model_page(f: &mut ratatui::Frame, app: &App) {
         f.render_widget(
             Paragraph::new("No models available. Try changing provider first.")
                 .style(Style::default().fg(OUTPUT_FG)),
-            area.inner(Margin { vertical: 3, horizontal: 4 }),
+            area.inner(Margin {
+                vertical: 3,
+                horizontal: 4,
+            }),
         );
     } else {
         for (i, model) in models.iter().enumerate() {
@@ -361,8 +383,7 @@ fn render_model_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Back   Enter: Select   ↑↓: Navigate ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }
@@ -373,16 +394,26 @@ fn render_baseurl_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" Edit Base URL ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let inner = area.inner(Margin {
+        vertical: 3,
+        horizontal: 4,
+    });
     let url = &app.settings_state.base_url;
 
     f.render_widget(
-        Paragraph::new("Base URL:")
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Paragraph::new("Base URL:").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
 
@@ -406,8 +437,7 @@ fn render_baseurl_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Back   Enter: Confirm   Type to edit ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }
@@ -418,11 +448,18 @@ fn render_apikey_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" Edit API Key ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let inner = area.inner(Margin {
+        vertical: 3,
+        horizontal: 4,
+    });
     let key = &app.settings_state.api_key;
 
     let display = if key.is_empty() {
@@ -432,8 +469,11 @@ fn render_apikey_page(f: &mut ratatui::Frame, app: &App) {
     };
 
     f.render_widget(
-        Paragraph::new("API Key:")
-            .style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Paragraph::new("API Key:").style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        ),
         Rect::new(inner.x, inner.y, inner.width, 1),
     );
 
@@ -447,8 +487,7 @@ fn render_apikey_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Back   Enter: Confirm   Type to edit (key is hidden) ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }
@@ -459,11 +498,18 @@ fn render_enable_page(f: &mut ratatui::Frame, app: &App) {
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Green))
         .title(" Enable AI ")
-        .title_style(Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
+        .title_style(
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
         .style(Style::default().bg(OUTPUT_BG).fg(OUTPUT_FG));
     f.render_widget(block, area);
 
-    let inner = area.inner(Margin { vertical: 3, horizontal: 4 });
+    let inner = area.inner(Margin {
+        vertical: 3,
+        horizontal: 4,
+    });
     let cursor = app.settings_cursor;
     let enabled = app.settings_state.enabled;
 
@@ -487,8 +533,7 @@ fn render_enable_page(f: &mut ratatui::Frame, app: &App) {
     let hint = " Esc: Back   Enter: Toggle ";
     let hint_y = area.height.saturating_sub(1);
     f.render_widget(
-        Paragraph::new(hint)
-            .style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
+        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray).bg(OUTPUT_BG)),
         Rect::new(0, hint_y, area.width, 1),
     );
 }

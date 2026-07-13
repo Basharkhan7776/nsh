@@ -3,9 +3,9 @@ pub mod config;
 
 pub use config::{AiConfig, ConfigError, ProviderType};
 
-use aisdk::providers::OpenAICompatible;
 use aisdk::core::DynamicModel;
 use aisdk::core::LanguageModelRequest;
+use aisdk::providers::OpenAICompatible;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -36,9 +36,9 @@ struct OllamaTagsResponse {
 
 pub async fn fetch_models(provider: ProviderType, base_url: &str) -> Vec<String> {
     match provider {
-        ProviderType::Ollama => {
-            fetch_ollama_models(base_url).await.unwrap_or_else(|_| default_ollama_models())
-        }
+        ProviderType::Ollama => fetch_ollama_models(base_url)
+            .await
+            .unwrap_or_else(|_| default_ollama_models()),
         ProviderType::OpenAI => default_openai_models(),
         ProviderType::Anthropic => default_anthropic_models(),
         ProviderType::OpenAICompatible => default_openai_models(),
@@ -48,10 +48,10 @@ pub async fn fetch_models(provider: ProviderType, base_url: &str) -> Vec<String>
 async fn fetch_ollama_models(base_url: &str) -> Result<Vec<String>, reqwest::Error> {
     let client = reqwest::Client::new();
     let url = format!("{}/api/tags", base_url.trim_end_matches('/'));
-    
+
     let response = client.get(&url).send().await?;
     let data: OllamaTagsResponse = response.json().await?;
-    
+
     Ok(data.models.into_iter().map(|m| m.name).collect())
 }
 
@@ -100,7 +100,7 @@ impl AiProvider {
             .api_key(config.api_key.clone().unwrap_or_default())
             .build()
             .expect("Failed to create OpenAICompatible provider");
-        
+
         Self { provider, config }
     }
 
@@ -118,7 +118,7 @@ impl AiProvider {
         }
 
         let user_message = messages.join("\n");
-        
+
         let response = LanguageModelRequest::builder()
             .model(self.provider.clone())
             .prompt(user_message)
