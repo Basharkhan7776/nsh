@@ -14,7 +14,84 @@ pub fn shorten_cwd(cwd: &str) -> String {
     cwd.to_string()
 }
 
-// Execute shell command and return output
+/// Split process output into display lines.
+/// - Normalizes `\r\n` / `\r`
+/// - Expands tab-separated multi-column rows (e.g. `ls -C`) into one cell per line
+/// - Preserves blank lines
+pub fn normalize_output_lines(text: &str) -> Vec<String> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    let mut lines = Vec::new();
+
+    for raw in text.split('\n') {
+        // Don't drop a final trailing empty from split — handle below.
+        if raw.contains('\t') {
+            // Columnar layout using tabs → one entry per line (list-friendly).
+            let cells: Vec<String> = raw
+                .split('\t')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            if cells.len() > 1 {
+                lines.extend(cells);
+                continue;
+            }
+        }
+        lines.push(raw.to_string());
+    }
+
+    // If the source ended without a trailing newline, `split` still yields the last
+    // chunk; if it ended WITH a newline we get a trailing empty string — keep one
+    // trailing blank only if the original text had content after a mid blank.
+    // Strip a single trailing empty that comes from a final `\n` (usual case).
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.is_empty()) && text.ends_with('\n') {
+        lines.pop();
+    }
+
+    lines
+}
+
+/// Whether this looks like a bare listing tool where one-entry-per-line is preferred.
+fn is_list_command(program: &str) -> bool {
+    matches!(
+        program,
+        "ls" | "dir" | "vdir" | "lsd" | "exa" | "eza" | "tree"
+    )
+}
+
+/// If user ran `ls` without an explicit format flag, force one name per line (`-1`).
+fn adjust_list_args(program: &str, args: &[&str]) -> Vec<String> {
+    if !is_list_command(program) {
+        return args.iter().map(|s| s.to_string()).collect();
+    }
+
+    // Respect user format choices (long list, columns, commas, etc.).
+    let has_format = args.iter().any(|a| {
+        if matches!(*a, "-1" | "-l" | "-C" | "-m" | "-x") {
+            return true;
+        }
+        if a.starts_with("--format") {
+            return true;
+        }
+        // Combined short flags like -la, -lh already imply long listing.
+        a.starts_with('-')
+            && !a.starts_with("--")
+            && a.chars()
+                .skip(1)
+                .any(|c| matches!(c, 'l' | 'C' | 'm' | 'x' | '1'))
+    });
+
+    if has_format {
+        return args.iter().map(|s| s.to_string()).collect();
+    }
+
+    // Default: one name per line (shell-friendly list layout).
+    let mut out = vec!["-1".to_string()];
+    out.extend(args.iter().map(|s| s.to_string()));
+    out
+}
+
+// Execute shell command and return output lines (one display row each).
 pub fn execute_command(input: &str) -> Vec<String> {
     let input = input.trim();
     if input.is_empty() {
@@ -26,17 +103,18 @@ pub fn execute_command(input: &str) -> Vec<String> {
         Some(p) => p,
         None => return vec![],
     };
-    let args: Vec<&str> = parts.collect();
+    let raw_args: Vec<&str> = parts.collect();
+    let args = adjust_list_args(program, &raw_args);
 
     // Built-in commands
     match program {
         "exit" | "quit" => vec![],
 
         "cd" => {
-            let target = if args.is_empty() {
+            let target = if raw_args.is_empty() {
                 std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
             } else {
-                args[0].to_string()
+                raw_args[0].to_string()
             };
             if let Err(e) = std::env::set_current_dir(&target) {
                 return vec![format!("cd: {}: {}", target, e)];
@@ -46,7 +124,7 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
         "clear" => return vec!["__CLEAR__".to_string()],
 
-        "/help" => {
+        "/help" | "help" => {
             return vec![
                 "Available commands:".to_string(),
                 "  ask <q> | /ask   - Ask AI anything (uses current model + RAG)".to_string(),
@@ -61,13 +139,13 @@ pub fn execute_command(input: &str) -> Vec<String> {
             ];
         }
 
-        "/settings" => {
+        "/settings" | "settings" => {
             return vec!["__SETTINGS__".to_string()];
         }
 
-        "/ask" | "ask" | "/do" | "do" | "/plan" | "plan" | "/build" | "build" | "/index" | "index" => {
+        "/ask" | "ask" | "/do" | "do" | "/plan" | "plan" | "/build" | "build" | "/index"
+        | "index" => {
             // These are handled in main.rs with full AI + tool loop (fresh config on every use).
-            // If we reach here it means the input was passed through the legacy path.
             return vec![format!(
                 "{}: AI command routing active (pass full input to AI handler).",
                 program
@@ -76,42 +154,34 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
         // External commands
         _ => {
-            use std::io::BufRead;
-            use std::io::BufReader;
-            use std::process::{Command, Stdio};
+            use std::process::Command;
 
-            let child = Command::new(program)
-                .args(&args)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn();
+            let result = Command::new(program).args(&args).output();
 
-            match child {
-                Ok(mut child) => {
-                    let mut output = Vec::new();
+            match result {
+                Ok(output) => {
+                    let mut lines = Vec::new();
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
 
-                    // Read stdout
-                    if let Some(stdout) = child.stdout.take() {
-                        let reader = BufReader::new(stdout);
-                        for line in reader.lines() {
-                            if let Ok(line) = line {
-                                output.push(line);
-                            }
+                    lines.extend(normalize_output_lines(&stdout));
+                    // Keep stderr after stdout, still line-oriented.
+                    let err_lines = normalize_output_lines(&stderr);
+                    if !err_lines.is_empty() {
+                        if !lines.is_empty() {
+                            // Visual separation between stdout and stderr blocks.
+                            // (only if stdout had content)
+                        }
+                        lines.extend(err_lines);
+                    }
+
+                    if lines.is_empty() && !output.status.success() {
+                        if let Some(code) = output.status.code() {
+                            lines.push(format!("{}: exited with status {}", program, code));
                         }
                     }
 
-                    // Read stderr
-                    if let Some(stderr) = child.stderr.take() {
-                        let reader = BufReader::new(stderr);
-                        for line in reader.lines() {
-                            if let Ok(line) = line {
-                                output.push(line);
-                            }
-                        }
-                    }
-
-                    child.wait().ok();
-                    output
+                    lines
                 }
                 Err(_e) => {
                     vec![format!("{}: command not found", program)]

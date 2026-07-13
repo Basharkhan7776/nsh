@@ -82,7 +82,7 @@ pub async fn run_ai_command(
         return Err(AiError::NotEnabled);
     }
 
-    let provider: AiProvider = create_provider(ai_config.clone());
+    let provider: AiProvider = create_provider(ai_config.clone())?;
 
     // Try to init RAG (best effort; failures are non-fatal)
     let rag = RagEngine::new_from_config(storage, &ai_config, None).await.ok();

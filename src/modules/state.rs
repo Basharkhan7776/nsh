@@ -98,6 +98,34 @@ impl Default for SettingsState {
     }
 }
 
+/// In-progress AI task (ask / do / plan / build) — drives the loading spinner UI.
+#[derive(Clone)]
+pub struct AiLoadingState {
+    pub verb: String,     // "Asking", "Planning", …
+    pub provider: String, // "gemini"
+    pub model: String,    // "gemini-3.5-flash"
+    pub frame: usize,     // spinner frame index
+}
+
+impl AiLoadingState {
+    pub const SPINNER: &'static [&'static str] =
+        &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+    pub fn spinner_glyph(&self) -> &'static str {
+        Self::SPINNER[self.frame % Self::SPINNER.len()]
+    }
+
+    pub fn status_line(&self) -> String {
+        format!(
+            "{} {} ({} / {}) — please wait…",
+            self.spinner_glyph(),
+            self.verb,
+            self.provider,
+            self.model
+        )
+    }
+}
+
 // Application state
 pub struct App {
     pub entries: Vec<Entry>,                        // All history entries
@@ -117,6 +145,7 @@ pub struct App {
     pub settings_cursor: usize,                     // Settings field cursor (Home page index)
     pub settings_input: String,                     // Input buffer for editing fields
     pub settings_nav: Vec<SettingsPage>,            // Navigation stack
+    pub ai_loading: Option<AiLoadingState>,         // Active AI request spinner
 }
 
 impl App {
@@ -140,6 +169,7 @@ impl App {
             settings_cursor: 0,
             settings_input: String::new(),
             settings_nav: Vec::new(),
+            ai_loading: None,
         }
     }
 
@@ -228,53 +258,65 @@ impl App {
         self.selected_suggestion = 0;
     }
 
-    // Move cursor to start of current word (going backward)
+    /// Move to the start of the previous whitespace-delimited word (shell-style).
     pub fn word_start_backward(&self) -> usize {
-        let input = &self.current_input[..self.cursor_position];
-        if input.is_empty() {
+        let cursor = self.cursor_position.min(self.current_input.len());
+        if cursor == 0 {
             return 0;
         }
+        let before = &self.current_input[..cursor];
 
-        let mut pos = input.len();
-        let mut prev_was_word = false;
-
-        for (i, c) in input.char_indices().rev() {
-            let is_word_char = c.is_alphanumeric() || c == '_';
-            if !prev_was_word && is_word_char && i > 0 {
-                pos = i;
+        // Skip trailing whitespace before the cursor.
+        let mut end = before.len();
+        for (i, c) in before.char_indices().rev() {
+            if !c.is_whitespace() {
+                end = i + c.len_utf8();
                 break;
             }
-            prev_was_word = is_word_char;
-            pos = i;
+            if i == 0 {
+                return 0;
+            }
         }
+        let trimmed = &before[..end];
 
-        pos
+        // Start of the word is just after the last whitespace.
+        match trimmed
+            .char_indices()
+            .rev()
+            .find(|(_, c)| c.is_whitespace())
+        {
+            Some((i, c)) => i + c.len_utf8(),
+            None => 0,
+        }
     }
 
-    // Move cursor to end of current word (going forward)
+    /// Move to the start of the next whitespace-delimited word (shell-style).
     pub fn word_start_forward(&self) -> usize {
-        let input = &self.current_input[self.cursor_position..];
-        let mut pos = self.cursor_position;
+        let cursor = self.cursor_position.min(self.current_input.len());
+        let rest = &self.current_input[cursor..];
+        if rest.is_empty() {
+            return self.current_input.len();
+        }
 
-        let mut chars = input.char_indices();
-        let _ = chars.next(); // Skip current char
+        let mut iter = rest.char_indices().peekable();
 
-        let mut prev_was_word = false;
-        for (i, c) in chars {
-            let is_word_char = c.is_alphanumeric() || c == '_';
-            if !prev_was_word && is_word_char {
-                pos = i + self.cursor_position;
-                break;
+        // Skip current word (non-whitespace).
+        if iter.peek().is_some_and(|(_, c)| !c.is_whitespace()) {
+            while iter.peek().is_some_and(|(_, c)| !c.is_whitespace()) {
+                iter.next();
             }
-            prev_was_word = is_word_char;
-            pos = i + self.cursor_position + 1;
         }
 
-        if pos > input.len() + self.cursor_position {
-            pos = self.current_input.len();
+        // Skip whitespace that follows.
+        while iter.peek().is_some_and(|(_, c)| c.is_whitespace()) {
+            iter.next();
         }
 
-        pos
+        // Land on next word start, or end of input.
+        match iter.peek() {
+            Some(&(i, _)) => cursor + i,
+            None => self.current_input.len(),
+        }
     }
 
     // Delete word before cursor (bash-style, save to kill ring)
@@ -366,7 +408,7 @@ impl App {
     pub fn settings_page_item_count(&self) -> usize {
         match self.current_settings_page() {
             SettingsPage::Home => SettingsField::count(),
-            SettingsPage::Provider => 4,
+            SettingsPage::Provider => ProviderType::count(),
             SettingsPage::Model => self.settings_state.available_models.len(),
             SettingsPage::Enable => 2,
             _ => 0,

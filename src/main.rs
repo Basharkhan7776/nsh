@@ -3,8 +3,8 @@
 
 use crossterm::{
     event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind, MouseButton,
-        MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -17,11 +17,36 @@ use nsh::{
     },
     fetch_models,
     keybindings::{Action, execute_action, get_action},
-    modules::state::{SettingsField, SettingsPage},
+    modules::state::{AiLoadingState, SettingsField, SettingsPage},
     rag::RagEngine,
     render,
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
+use std::sync::mpsc;
+
+/// Resolve Alt/Meta key combos.
+///
+/// Terminals often send Alt+Key as two events: `Esc` then `Key` within a few ms.
+/// If a bare Esc arrives, peek for a following key and treat it as Alt+Key.
+/// A lone Esc (no follow-up) is left as Esc.
+fn resolve_key_with_alt_meta(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+    if code != KeyCode::Esc || modifiers != KeyModifiers::NONE {
+        return (code, modifiers);
+    }
+
+    // Short window: real Esc is alone; Alt sequences arrive almost immediately.
+    if event::poll(std::time::Duration::from_millis(25)).unwrap_or(false) {
+        if let Ok(Event::Key(next)) = event::read() {
+            if next.kind == KeyEventKind::Press {
+                let mut mods = next.modifiers;
+                mods.insert(KeyModifiers::ALT);
+                return (next.code, mods);
+            }
+        }
+    }
+
+    (code, modifiers)
+}
 
 fn load_settings_state() -> nsh::modules::state::SettingsState {
     let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
@@ -43,22 +68,42 @@ fn save_settings_state(state: &nsh::modules::state::SettingsState) {
 
     config.ai.provider = state.provider;
     config.ai.model = state.model.clone();
-    config.ai.base_url = state.base_url.clone();
-    config.ai.api_key = if state.api_key_original.is_empty() {
+    config.ai.base_url = state.base_url.trim().to_string();
+    // Trim so pasted keys with trailing newlines still work.
+    let key = state.api_key_original.trim();
+    config.ai.api_key = if key.is_empty() {
         None
     } else {
-        Some(state.api_key_original.clone())
+        Some(key.to_string())
     };
     config.ai.enabled = state.enabled;
 
     let _ = storage.save_config(&config);
 }
 
+fn set_mouse_capture(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    enable: bool,
+) -> std::io::Result<()> {
+    if enable {
+        execute!(terminal.backend_mut(), EnableMouseCapture)?;
+    } else {
+        execute!(terminal.backend_mut(), DisableMouseCapture)?;
+    }
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
-    // Initialize terminal for alternate screen buffer
+    // Initialize terminal for alternate screen buffer.
+    // Do NOT enable mouse capture by default — it steals mouse events from the
+    // terminal emulator and prevents drag-select / copy of output text.
+    // Mouse capture is toggled on only while the settings UI is open.
+    //
+    // Enable bracketed paste so Ctrl+Shift+V / right-click paste arrives as a
+    // single Event::Paste (required for pasting API keys into settings).
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
@@ -70,17 +115,29 @@ fn main() -> std::io::Result<()> {
         content: vec![
             "Welcome to nsh - AI-Powered Shell".to_string(),
             "Type 'help' for commands".to_string(),
-            "Use Tab for autocomplete, Up/Down for history".to_string(),
+            "Use Tab for autocomplete, Up/Down for history, PageUp/PageDown to scroll".to_string(),
+            "Select text with the mouse to copy (terminal selection). Ctrl+Shift+C copies input/last output.".to_string(),
             "Type 'settings' or Ctrl+, for AI provider/model.  ask / do / plan / build + RAG ready.".to_string(),
         ],
         cwd: "~".to_string(),
     });
 
     let mut running = true;
+    let mut mouse_captured = false;
 
     // Main event loop - processes keyboard and mouse input
     while running {
-        render(&mut terminal, &app)?;
+        // Keep mouse capture in sync with settings (clicks only needed there).
+        // Leaving it off in the shell lets the terminal handle text selection.
+        if app.show_settings && !mouse_captured {
+            set_mouse_capture(&mut terminal, true)?;
+            mouse_captured = true;
+        } else if !app.show_settings && mouse_captured {
+            set_mouse_capture(&mut terminal, false)?;
+            mouse_captured = false;
+        }
+
+        render(&mut terminal, &mut app)?;
 
         loop {
             match event::poll(std::time::Duration::from_millis(50)) {
@@ -102,7 +159,11 @@ fn main() -> std::io::Result<()> {
                                     .map(|p| p.to_string_lossy().to_string())
                                     .unwrap_or_else(|_| "~".to_string());
 
-                                let action = get_action(key.code, key.modifiers);
+                                // Many terminals encode Alt+Key as Esc then Key (two events).
+                                // Peek briefly after bare Esc and promote the next key to Alt.
+                                let (key_code, modifiers) =
+                                    resolve_key_with_alt_meta(key.code, key.modifiers);
+                                let action = get_action(key_code, modifiers);
 
                                 // Handle special actions that need cwd or custom logic
                                 match action {
@@ -194,43 +255,122 @@ fn main() -> std::io::Result<()> {
                                                     .unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
 
-                                                // Show a thinking indicator
-                                                app.add_entry(Entry {
-                                                    entry_type: EntryType::System,
-                                                    content: vec![format!(
-                                                        "🤖 {} ({} / {}) ...",
-                                                        match ai_cmd {
-                                                            AiCommand::Ask => "Asking",
-                                                            AiCommand::Do => "Doing",
-                                                            AiCommand::Plan => "Planning",
-                                                            AiCommand::Build => "Building",
-                                                        },
-                                                        ai_cfg.provider,
-                                                        if ai_cfg.model.is_empty() {
-                                                            "default"
-                                                        } else {
-                                                            &ai_cfg.model
-                                                        }
-                                                    )],
-                                                    cwd: String::new(),
-                                                });
-
-                                                let rt = tokio::runtime::Runtime::new().unwrap();
-                                                let ai_out = rt.block_on(run_ai_command(
-                                                    ai_cmd, &query, ai_cfg, &storage,
-                                                ));
-
-                                                let output_lines = match ai_out {
-                                                    Ok(lines) => lines,
-                                                    Err(e) => vec![format!("AI error: {}", e)],
+                                                let verb = match ai_cmd {
+                                                    AiCommand::Ask => "Asking",
+                                                    AiCommand::Do => "Doing",
+                                                    AiCommand::Plan => "Planning",
+                                                    AiCommand::Build => "Building",
+                                                };
+                                                let model = if ai_cfg.model.is_empty() {
+                                                    "default".to_string()
+                                                } else {
+                                                    ai_cfg.model.clone()
                                                 };
 
-                                                if !output_lines.is_empty() {
-                                                    app.add_entry(Entry {
-                                                        entry_type: EntryType::Output,
-                                                        content: output_lines,
-                                                        cwd: String::new(),
-                                                    });
+                                                // Clear input immediately so the loading UI is obvious.
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.show_suggestions = false;
+                                                app.current_suggestions.clear();
+
+                                                // Start animated loading bar (must paint before work starts).
+                                                app.ai_loading = Some(AiLoadingState {
+                                                    verb: verb.to_string(),
+                                                    provider: ai_cfg.provider.to_string(),
+                                                    model: model.clone(),
+                                                    frame: 0,
+                                                });
+                                                render(&mut terminal, &mut app)?;
+
+                                                // Run AI on a background thread so the UI can spin.
+                                                let (tx, rx) = mpsc::channel();
+                                                let ai_cfg_bg = ai_cfg.clone();
+                                                let query_bg = query.clone();
+                                                std::thread::spawn(move || {
+                                                    let storage = LocalStorage::new()
+                                                        .unwrap_or_else(|_| {
+                                                            LocalStorage::default()
+                                                        });
+                                                    let rt = match tokio::runtime::Runtime::new() {
+                                                        Ok(rt) => rt,
+                                                        Err(e) => {
+                                                            let _ = tx.send(Err(
+                                                                nsh::AiError::Request(format!(
+                                                                    "runtime: {e}"
+                                                                )),
+                                                            ));
+                                                            return;
+                                                        }
+                                                    };
+                                                    let res = rt.block_on(run_ai_command(
+                                                        ai_cmd, &query_bg, ai_cfg_bg, &storage,
+                                                    ));
+                                                    let _ = tx.send(res);
+                                                });
+
+                                                // Animate spinner until the AI task finishes.
+                                                loop {
+                                                    if let Some(ref mut loading) = app.ai_loading {
+                                                        loading.frame =
+                                                            loading.frame.wrapping_add(1);
+                                                    }
+                                                    render(&mut terminal, &mut app)?;
+
+                                                    match rx.try_recv() {
+                                                        Ok(ai_out) => {
+                                                            app.ai_loading = None;
+                                                            let output_lines = match ai_out {
+                                                                Ok(lines) => lines,
+                                                                Err(e) => {
+                                                                    vec![format!("AI error: {}", e)]
+                                                                }
+                                                            };
+                                                            if !output_lines.is_empty() {
+                                                                app.add_entry(Entry {
+                                                                    entry_type: EntryType::Output,
+                                                                    content: output_lines,
+                                                                    cwd: String::new(),
+                                                                });
+                                                            } else {
+                                                                app.add_entry(Entry {
+                                                                    entry_type: EntryType::System,
+                                                                    content: vec![format!(
+                                                                        "✓ {} finished (empty response)",
+                                                                        verb
+                                                                    )],
+                                                                    cwd: String::new(),
+                                                                });
+                                                            }
+                                                            break;
+                                                        }
+                                                        Err(mpsc::TryRecvError::Empty) => {
+                                                            // Keep UI alive; drain input so it doesn't pile up.
+                                                            while event::poll(
+                                                                std::time::Duration::from_millis(0),
+                                                            )
+                                                            .unwrap_or(false)
+                                                            {
+                                                                let _ = event::read();
+                                                            }
+                                                            std::thread::sleep(
+                                                                std::time::Duration::from_millis(
+                                                                    80,
+                                                                ),
+                                                            );
+                                                        }
+                                                        Err(mpsc::TryRecvError::Disconnected) => {
+                                                            app.ai_loading = None;
+                                                            app.add_entry(Entry {
+                                                                entry_type: EntryType::System,
+                                                                content: vec![
+                                                                    "AI task ended unexpectedly"
+                                                                        .to_string(),
+                                                                ],
+                                                                cwd: String::new(),
+                                                            });
+                                                            break;
+                                                        }
+                                                    }
                                                 }
                                             } else {
                                                 let output = nsh::execute_command(&input);
@@ -415,6 +555,22 @@ fn main() -> std::io::Result<()> {
                                 break;
                             }
 
+                            // Terminal paste (Ctrl+Shift+V / right-click paste with
+                            // bracketed paste enabled). Prefer this path for API keys.
+                            Event::Paste(text) => {
+                                if app.show_settings {
+                                    settings_apply_paste(&mut app, &text);
+                                } else {
+                                    // Insert into the shell input line.
+                                    let cleaned = text.replace('\r', "");
+                                    app.current_input.insert_str(app.cursor_position, &cleaned);
+                                    app.cursor_position += cleaned.len();
+                                    app.history_index = None;
+                                    app.update_suggestions();
+                                }
+                                break;
+                            }
+
                             // Mouse input handling
                             Event::Mouse(mouse) => {
                                 // Settings mode: left click selects item
@@ -438,6 +594,14 @@ fn main() -> std::io::Result<()> {
                                             app.settings_cursor = idx;
                                             settings_handle_enter(&mut app);
                                         }
+                                    }
+                                }
+                                // Middle-click paste (primary selection) into editable settings.
+                                if app.show_settings
+                                    && mouse.kind == MouseEventKind::Down(MouseButton::Middle)
+                                {
+                                    if let Some(text) = nsh::keybindings::paste_from_clipboard() {
+                                        settings_apply_paste(&mut app, &text);
                                     }
                                 }
                                 if mouse.kind == MouseEventKind::ScrollUp {
@@ -471,25 +635,77 @@ fn main() -> std::io::Result<()> {
     }
 
     // Cleanup - restore terminal to normal mode
+    if mouse_captured {
+        let _ = set_mouse_capture(&mut terminal, false);
+    }
     disable_raw_mode()?;
     execute!(
         terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
+        DisableBracketedPaste,
+        LeaveAlternateScreen
     )?;
     println!("\nGoodbye!");
     Ok(())
 }
 
+/// Apply pasted text to the current settings field (API key / base URL).
+fn settings_apply_paste(app: &mut App, text: &str) {
+    use SettingsPage::*;
+
+    // Strip surrounding whitespace/newlines from clipboard dumps.
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return;
+    }
+
+    match app.current_settings_page() {
+        BaseUrl => {
+            app.settings_state.base_url = text;
+        }
+        ApiKey => {
+            // Replace entire key on paste (secret-field UX).
+            app.settings_state.api_key = text.clone();
+            app.settings_state.api_key_original = text;
+        }
+        _ => {
+            // On other pages, ignore paste (or future: paste into search).
+        }
+    }
+}
+
 fn handle_settings_input(
     app: &mut App,
     key_code: crossterm::event::KeyCode,
-    _modifiers: crossterm::event::KeyModifiers,
+    modifiers: crossterm::event::KeyModifiers,
 ) {
     use SettingsPage::*;
     use crossterm::event::KeyCode;
 
     let page = app.current_settings_page();
+    let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+
+    // Clipboard paste via Ctrl+V / Ctrl+Shift+V (arboard).
+    // Note: many terminals deliver Ctrl+Shift+V as Event::Paste instead (handled
+    // in the main loop via EnableBracketedPaste).
+    if ctrl && matches!(key_code, KeyCode::Char('v') | KeyCode::Char('V')) {
+        if let Some(text) = nsh::keybindings::paste_from_clipboard() {
+            settings_apply_paste(app, &text);
+        }
+        return;
+    }
+
+    // Ctrl+U clears the current editable field.
+    if ctrl && matches!(key_code, KeyCode::Char('u') | KeyCode::Char('U')) {
+        match page {
+            BaseUrl => app.settings_state.base_url.clear(),
+            ApiKey => {
+                app.settings_state.api_key.clear();
+                app.settings_state.api_key_original.clear();
+            }
+            _ => {}
+        }
+        return;
+    }
 
     match key_code {
         KeyCode::Esc => {
@@ -501,7 +717,7 @@ fn handle_settings_input(
         KeyCode::Up => app.settings_move_up(),
         KeyCode::Down => app.settings_move_down(),
         KeyCode::Enter => settings_handle_enter(app),
-        KeyCode::Char(c) => match page {
+        KeyCode::Char(c) if !ctrl => match page {
             BaseUrl => {
                 app.settings_state.base_url.push(c);
             }
@@ -535,12 +751,7 @@ fn settings_handle_enter(app: &mut App) {
             match field {
                 SettingsField::Provider => {
                     app.settings_push(Provider);
-                    app.settings_cursor = match app.settings_state.provider {
-                        ProviderType::Ollama => 0,
-                        ProviderType::OpenAI => 1,
-                        ProviderType::Anthropic => 2,
-                        ProviderType::OpenAICompatible => 3,
-                    };
+                    app.settings_cursor = app.settings_state.provider.index();
                 }
                 SettingsField::Model => {
                     if !app.settings_state.available_models.is_empty() {
@@ -577,13 +788,10 @@ fn settings_handle_enter(app: &mut App) {
             }
         }
         Provider => {
-            let provider = match app.settings_cursor {
-                0 => ProviderType::Ollama,
-                1 => ProviderType::OpenAI,
-                2 => ProviderType::Anthropic,
-                3 => ProviderType::OpenAICompatible,
-                _ => return,
-            };
+            if app.settings_cursor >= ProviderType::count() {
+                return;
+            }
+            let provider = ProviderType::from_index(app.settings_cursor);
             app.settings_state.provider = provider;
             app.settings_state.base_url = provider.default_url().to_string();
             app.settings_state.model = String::new();

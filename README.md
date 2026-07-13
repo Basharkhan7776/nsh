@@ -13,7 +13,7 @@ Unlike a typical AI chatbot wrapper, nsh is designed to **act** on your Linux sy
 - **System-aware**: Knows your current directory, file structure, and command history
 - **Tool-equipped**: Built-in tools for `web_search`, `cat`, `ls`, and `grep` that the AI can invoke
 - **RAG-ready**: Document indexing and semantic search via vector embeddings (Ollama-powered)
-- **Provider-agnostic**: Works with Ollama (local), OpenAI, Anthropic, or any OpenAI-compatible API
+- **Provider-agnostic**: Works with Ollama (local), OpenAI, Anthropic, Gemini, OpenRouter, or any OpenAI-compatible API
 - **Terminal-native**: Full TUI built with [ratatui](https://github.com/ratatui/ratatui) — no browser, no electron
 
 ---
@@ -24,13 +24,14 @@ Unlike a typical AI chatbot wrapper, nsh is designed to **act** on your Linux sy
 - **Rich TUI**: Full-screen terminal interface with syntax highlighting and color-coded output
 - **Smart Completions**: Tab-based autocomplete for commands (from `$PATH`), files, directories, and command history
 - **Command History**: Scrollable history with Up/Down navigation
-- **Mouse Support**: Scroll history, navigate suggestions, and click settings items
+- **Mouse Support**: Click settings items (mouse capture is off in the shell so you can select/copy text)
+- **Text selection**: Drag-select output with the mouse (native terminal selection); middle-click or right-click copy as usual
 - **Kill Ring**: Bash-style `Ctrl+W` (cut word) and `Ctrl+Y` (yank/paste)
-- **System Clipboard**: `Ctrl+Shift+C` to copy, `Ctrl+Shift+V` to paste
-- **Word Navigation**: `Alt+←/→` to move by word, `Ctrl+A/E` for line start/end
+- **System Clipboard**: `Ctrl+Shift+C` copies input (or last output if empty), `Ctrl+Shift+V` pastes
+- **Word Navigation**: `Ctrl+←/→` or `Alt+←/→` to move by word, `Ctrl+A/E` for line start/end, `Alt+Backspace` to delete word
 
 ### AI Integration
-- **Multi-provider**: Ollama, OpenAI, Anthropic, OpenAI-Compatible endpoints
+- **Multi-provider**: Ollama, OpenAI, Anthropic, Gemini, OpenRouter, OpenAI-Compatible endpoints
 - **Dynamic Model Discovery**: Automatically fetches available models from Ollama; hardcoded defaults for cloud providers
 - **Full-screen Settings TUI**: Configure provider, model, base URL, and API key via `settings` or `/settings`
   - Stack-based navigation: select a setting → full-screen sub-page → `Esc` to go back
@@ -120,7 +121,7 @@ Open settings with `settings`, `/settings`, or `Ctrl+Comma`:
    - **Save**: persists to `~/.config/nsh/config.json`
    - **Cancel**: closes without saving
 2. **Sub-pages**: Each setting opens a dedicated full-screen page:
-   - **Provider**: Choose between Ollama, OpenAI, Anthropic, OpenAI Compatible
+   - **Provider**: Choose between Ollama, OpenAI, Anthropic, Gemini, OpenRouter, OpenAI Compatible
    - **Model**: Select from available models (auto-fetched for Ollama)
    - **Base URL**: Edit the API endpoint URL
    - **API Key**: Enter your API key (masked as `••••••••`)
@@ -138,19 +139,23 @@ Open settings with `settings`, `/settings`, or `Ctrl+Comma`:
 | `Tab` | Autocomplete command/file |
 | `Ctrl+C` | Interrupt / clear input |
 | `Ctrl+D` | EOF (exit when input is empty) |
-| `Ctrl+A` | Move cursor to line start |
+| `Home` / `Ctrl+A` | Move cursor to line start |
+| `End` / `Ctrl+E` | Move cursor to line end |
 | `Ctrl+E` | Move cursor to line end |
 | `Ctrl+W` | Delete word before cursor (kill) |
 | `Ctrl+Y` | Yank (paste) last killed text |
 | `Ctrl+U` | Delete from cursor to line start |
 | `Ctrl+K` | Delete from cursor to line end |
+| `Ctrl+←` / `Ctrl+→` | Move cursor by word |
 | `Alt+←` / `Alt+→` | Move cursor by word |
-| `Ctrl+Shift+C` | Copy current input to clipboard |
+| `Alt+Backspace` / `Ctrl+Backspace` | Delete previous word |
+| `Ctrl+Shift+C` | Copy current input (or last output if input empty) to clipboard |
 | `Ctrl+Shift+V` | Paste from clipboard |
+| Mouse drag | Select text for copy (terminal native selection) |
+| `PageUp` / `PageDown` | Scroll history or suggestions |
 | `Ctrl+,` | Open AI Settings |
 | `Esc` | Cancel suggestions / close dialogs |
-| `Mouse Scroll` | Scroll history or suggestions |
-| `Mouse Click` | Select settings items |
+| `Mouse Click` | Select settings items (settings UI only) |
 
 ---
 
@@ -179,6 +184,8 @@ Config is stored at `~/.config/nsh/config.json`:
 | Ollama | `http://localhost:11434` |
 | OpenAI | `https://api.openai.com/v1` |
 | Anthropic | `https://api.anthropic.com` |
+| Gemini | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| OpenRouter | `https://openrouter.ai/api/v1` |
 | OpenAI Compatible | `http://localhost:11434/v1` |
 
 ---
