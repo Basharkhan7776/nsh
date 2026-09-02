@@ -91,6 +91,71 @@ fn adjust_list_args(program: &str, args: &[&str]) -> Vec<String> {
     out
 }
 
+/// Parse a command string into words, respecting single quotes, double quotes, and backslash escapes.
+pub fn parse_command_line(input: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+    let mut in_token = false;
+
+    for c in input.chars() {
+        if escaped {
+            current.push(c);
+            in_token = true;
+            escaped = false;
+        } else if c == '\\' && !in_single_quote {
+            escaped = true;
+            in_token = true;
+        } else if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+            in_token = true;
+        } else if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+            in_token = true;
+        } else if c.is_whitespace() && !in_single_quote && !in_double_quote {
+            if in_token {
+                tokens.push(std::mem::take(&mut current));
+                in_token = false;
+            }
+        } else {
+            current.push(c);
+            in_token = true;
+        }
+    }
+
+    if in_token {
+        tokens.push(current);
+    }
+
+    tokens
+}
+
+/// Check if input has unquoted shell metacharacters like pipes, redirections, or chains.
+pub fn has_unquoted_shell_metachars(input: &str) -> bool {
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut escaped = false;
+
+    for c in input.chars() {
+        if escaped {
+            escaped = false;
+        } else if c == '\\' && !in_single_quote {
+            escaped = true;
+        } else if c == '\'' && !in_double_quote {
+            in_single_quote = !in_single_quote;
+        } else if c == '"' && !in_single_quote {
+            in_double_quote = !in_double_quote;
+        } else if !in_single_quote && !in_double_quote {
+            if matches!(c, '|' | '>' | '<' | '&' | ';') {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 // Execute shell command and return output lines (one display row each).
 pub fn execute_command(input: &str) -> Vec<String> {
     let input = input.trim();
@@ -98,13 +163,13 @@ pub fn execute_command(input: &str) -> Vec<String> {
         return vec![];
     }
 
-    let mut parts = input.split_whitespace();
-    let program = match parts.next() {
-        Some(p) => p,
-        None => return vec![],
-    };
-    let raw_args: Vec<&str> = parts.collect();
-    let args = adjust_list_args(program, &raw_args);
+    let tokens = parse_command_line(input);
+    if tokens.is_empty() {
+        return vec![];
+    }
+
+    let program = tokens[0].as_str();
+    let raw_args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
 
     // Built-in commands
     match program {
@@ -114,7 +179,18 @@ pub fn execute_command(input: &str) -> Vec<String> {
             let target = if raw_args.is_empty() {
                 std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
             } else {
-                raw_args[0].to_string()
+                let p = raw_args[0].trim();
+                if p == "~" {
+                    std::env::var("HOME").unwrap_or_else(|_| String::from("/"))
+                } else if let Some(rest) = p.strip_prefix("~/") {
+                    if let Ok(home) = std::env::var("HOME") {
+                        format!("{}/{}", home, rest)
+                    } else {
+                        p.to_string()
+                    }
+                } else {
+                    p.to_string()
+                }
             };
             if let Err(e) = std::env::set_current_dir(&target) {
                 return vec![format!("cd: {}: {}", target, e)];
@@ -156,7 +232,13 @@ pub fn execute_command(input: &str) -> Vec<String> {
         _ => {
             use std::process::Command;
 
-            let result = Command::new(program).args(&args).output();
+            let result = if has_unquoted_shell_metachars(input) {
+                // If the command contains unquoted pipes, redirects, or chains, delegate to sh
+                Command::new("sh").arg("-c").arg(input).output()
+            } else {
+                let args = adjust_list_args(program, &raw_args);
+                Command::new(program).args(&args).output()
+            };
 
             match result {
                 Ok(output) => {
@@ -165,13 +247,8 @@ pub fn execute_command(input: &str) -> Vec<String> {
                     let stderr = String::from_utf8_lossy(&output.stderr);
 
                     lines.extend(normalize_output_lines(&stdout));
-                    // Keep stderr after stdout, still line-oriented.
                     let err_lines = normalize_output_lines(&stderr);
                     if !err_lines.is_empty() {
-                        if !lines.is_empty() {
-                            // Visual separation between stdout and stderr blocks.
-                            // (only if stdout had content)
-                        }
                         lines.extend(err_lines);
                     }
 
@@ -188,5 +265,65 @@ pub fn execute_command(input: &str) -> Vec<String> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_command_line_double_quotes() {
+        let input = r#"git commit -m "feat: improve settings ui and add more suggestion params""#;
+        let tokens = parse_command_line(input);
+        assert_eq!(
+            tokens,
+            vec![
+                "git",
+                "commit",
+                "-m",
+                "feat: improve settings ui and add more suggestion params"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_command_line_single_quotes() {
+        let input = "echo 'hello world' 'another test'";
+        let tokens = parse_command_line(input);
+        assert_eq!(tokens, vec!["echo", "hello world", "another test"]);
+    }
+
+    #[test]
+    fn test_parse_command_line_escaped_and_nested() {
+        let input = r#"echo "escaped \"quotes\"" hello\ world 'nested "quote"'"#;
+        let tokens = parse_command_line(input);
+        assert_eq!(
+            tokens,
+            vec![
+                "echo",
+                r#"escaped "quotes""#,
+                "hello world",
+                r#"nested "quote""#
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_command_line_empty_strings() {
+        let input = r#"git commit -m """#;
+        let tokens = parse_command_line(input);
+        assert_eq!(tokens, vec!["git", "commit", "-m", ""]);
+    }
+
+    #[test]
+    fn test_has_unquoted_shell_metachars() {
+        assert!(!has_unquoted_shell_metachars(
+            r#"git commit -m "feat: improve settings ui and add more suggestion params""#
+        ));
+        assert!(!has_unquoted_shell_metachars(r#"echo "hello | world""#));
+        assert!(has_unquoted_shell_metachars("cat file.txt | grep foo"));
+        assert!(has_unquoted_shell_metachars("echo foo > bar.txt"));
+        assert!(has_unquoted_shell_metachars("cargo check && cargo test"));
     }
 }

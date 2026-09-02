@@ -9,7 +9,7 @@ pub mod rag;
 // Re-export public types and functions
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
 pub use ai::agent::{run_ai_command, AiCommand};
-pub use modules::commands::{execute_command, shorten_cwd};
+pub use modules::commands::{execute_command, parse_command_line, shorten_cwd};
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{
     COMMAND_FG, CWD_FG, INPUT_BG, INPUT_PROMPT_FG, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
