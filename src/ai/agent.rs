@@ -81,33 +81,131 @@ impl AiCommand {
     }
 }
 
-/// Resolve @filepath references in the user query against the working directory
+/// Resolve @filepath and @folder references in the user query against the working directory
 fn resolve_file_references(query: &str, cwd: &str) -> (String, Vec<String>) {
     let mut extra_context = Vec::new();
+    let mut seen_paths = std::collections::HashSet::new();
+
     for word in query.split_whitespace() {
         if let Some(target) = word.strip_prefix('@') {
             let clean_path = target.trim_matches(|c: char| {
                 !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
             });
-            if !clean_path.is_empty() {
-                let full = std::path::Path::new(cwd).join(clean_path);
-                if full.is_file() {
-                    if let Ok(content) = std::fs::read_to_string(&full) {
-                        let snippet = if content.len() > 30_000 {
-                            format!("{}... [truncated]", &content[..30_000])
-                        } else {
-                            content
-                        };
-                        extra_context.push(format!(
-                            "Referenced file @{}:\n```\n{}\n```",
-                            clean_path, snippet
-                        ));
-                    }
+            if clean_path.is_empty() || !seen_paths.insert(clean_path.to_string()) {
+                continue;
+            }
+
+            let full = std::path::Path::new(cwd).join(clean_path);
+            if full.is_file() {
+                if let Ok(content) = std::fs::read_to_string(&full) {
+                    let snippet = if content.len() > 30_000 {
+                        format!("{}... [truncated]", &content[..30_000])
+                    } else {
+                        content
+                    };
+                    extra_context.push(format!(
+                        "Referenced file @{}:\n```\n{}\n```",
+                        clean_path, snippet
+                    ));
                 }
+            } else if full.is_dir() {
+                let folder_ctx = format_folder_context(&full, clean_path);
+                extra_context.push(folder_ctx);
             }
         }
     }
     (query.to_string(), extra_context)
+}
+
+fn format_folder_context(dir_path: &std::path::Path, rel_label: &str) -> String {
+    let mut out = format!("Referenced folder @{}:\nDirectory structure:\n", rel_label);
+    let mut files_to_read = Vec::new();
+    let mut tree_lines = Vec::new();
+    let mut count = 0;
+
+    fn walk_dir(
+        dir: &std::path::Path,
+        current_depth: usize,
+        max_depth: usize,
+        lines: &mut Vec<String>,
+        files: &mut Vec<std::path::PathBuf>,
+        count: &mut usize,
+    ) {
+        if current_depth > max_depth || *count >= 60 {
+            return;
+        }
+        let mut entries: Vec<_> = match std::fs::read_dir(dir) {
+            Ok(rd) => rd.filter_map(|e| e.ok()).collect(),
+            Err(_) => return,
+        };
+        entries.sort_by_key(|e| e.file_name());
+
+        for entry in entries {
+            if *count >= 60 {
+                break;
+            }
+            let file_name = entry.file_name().to_string_lossy().to_string();
+            if file_name.starts_with('.') || file_name == "target" || file_name == "node_modules" {
+                continue;
+            }
+            *count += 1;
+            let indent = "  ".repeat(current_depth + 1);
+            let path = entry.path();
+            if path.is_dir() {
+                lines.push(format!("{}{}/", indent, file_name));
+                walk_dir(&path, current_depth + 1, max_depth, lines, files, count);
+            } else {
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                lines.push(format!("{}{}{}", indent, file_name, format_size_suffix(size)));
+                if files.len() < 5 && is_inspectable_file(&file_name) && size < 25_000 {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    walk_dir(dir_path, 0, 3, &mut tree_lines, &mut files_to_read, &mut count);
+    out.push_str(&tree_lines.join("\n"));
+
+    if !files_to_read.is_empty() {
+        out.push_str("\n\nKey file contents:\n");
+        let mut total_bytes = 0;
+        for file in files_to_read {
+            if total_bytes > 30_000 {
+                break;
+            }
+            if let Ok(content) = std::fs::read_to_string(&file) {
+                let name = file.file_name().unwrap_or_default().to_string_lossy();
+                let snippet = if content.len() > 6000 {
+                    format!("{}... [truncated]", &content[..6000])
+                } else {
+                    content
+                };
+                total_bytes += snippet.len();
+                out.push_str(&format!("\n--- {} ---\n{}\n", name, snippet));
+            }
+        }
+    }
+
+    out
+}
+
+fn format_size_suffix(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!(" ({} B)", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!(" ({:.1} KB)", bytes as f64 / 1024.0)
+    } else {
+        format!(" ({:.1} MB)", bytes as f64 / (1024.0 * 1024.0))
+    }
+}
+
+fn is_inspectable_file(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    matches!(
+        lower.split('.').last(),
+        Some("rs" | "js" | "ts" | "jsx" | "tsx" | "py" | "html" | "css" | "json" | "toml" | "yaml" | "yml" | "md" | "sh" | "sql")
+    )
 }
 
 /// Main entry for running an AI command. Returns lines to display as output.
@@ -116,6 +214,7 @@ pub async fn run_ai_command(
     user_query: &str,
     ai_config: AiConfig,
     storage: &LocalStorage,
+    cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<Vec<String>, AiError> {
     if !ai_config.enabled {
         return Err(AiError::NotEnabled);
@@ -159,9 +258,21 @@ pub async fn run_ai_command(
     let mut tools_executed = 0;
 
     for _step in 0..max_steps {
+        if let Some(ref cancel) = cancel_token {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(vec!["^C [Process stopped by Esc]".to_string()]);
+            }
+        }
+
         let prompt = history.join("\n\n");
 
         let response = provider.chat(vec![prompt]).await?;
+
+        if let Some(ref cancel) = cancel_token {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Ok(vec!["^C [Process stopped by Esc]".to_string()]);
+            }
+        }
 
         // Parse tool calls (supports one or multiple TOOL: blocks per response)
         let tool_calls = parse_tool_calls(&response);
@@ -169,6 +280,11 @@ pub async fn run_ai_command(
             history.push(format!("Assistant: {}", response.trim()));
 
             for (tool_name, args_json) in tool_calls {
+                if let Some(ref cancel) = cancel_token {
+                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Ok(vec!["^C [Process stopped by Esc]".to_string()]);
+                    }
+                }
                 let tool_res = execute_tool(&tool_name, args_json).await
                     .unwrap_or_else(|e| serde_json::json!({"error": e}));
 
@@ -621,5 +737,19 @@ mod tests {
         assert!(extra[0].contains("file content here"));
         let _ = std::fs::remove_file(temp);
     }
+
+    #[test]
+    fn test_resolve_folder_references_existing() {
+        let temp = std::env::temp_dir().join(format!("nsh_test_dir_ref_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(temp.join("subdir"));
+        let _ = std::fs::write(temp.join("hello.rs"), "fn hello() {}");
+        let query = format!("look at @{}", temp.file_name().unwrap().to_string_lossy());
+        let (_q, extra) = resolve_file_references(&query, temp.parent().unwrap().to_str().unwrap());
+        assert_eq!(extra.len(), 1);
+        assert!(extra[0].contains("Referenced folder @"));
+        assert!(extra[0].contains("hello.rs"));
+        let _ = std::fs::remove_dir_all(temp);
+    }
 }
+
 

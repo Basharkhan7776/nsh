@@ -230,17 +230,59 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
         // External commands
         _ => {
-            use std::process::Command;
+            use std::process::{Command, Stdio};
 
-            let result = if has_unquoted_shell_metachars(input) {
-                // If the command contains unquoted pipes, redirects, or chains, delegate to sh
-                Command::new("sh").arg("-c").arg(input).output()
+            let spawn_res = if has_unquoted_shell_metachars(input) {
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(input)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
             } else {
                 let args = adjust_list_args(program, &raw_args);
-                Command::new(program).args(&args).output()
+                Command::new(program)
+                    .args(&args)
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
             };
 
-            match result {
+            let mut child = match spawn_res {
+                Ok(c) => c,
+                Err(_e) => {
+                    return vec![format!("{}: command not found", program)];
+                }
+            };
+
+            let mut user_cancelled = false;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(_status)) => break,
+                    Ok(None) => {
+                        if crossterm::event::poll(std::time::Duration::from_millis(25)).unwrap_or(false) {
+                            if let Ok(crossterm::event::Event::Key(key)) = crossterm::event::read() {
+                                if key.code == crossterm::event::KeyCode::Esc
+                                    || (key.code == crossterm::event::KeyCode::Char('c')
+                                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL))
+                                {
+                                    let _ = child.kill();
+                                    user_cancelled = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+
+            if user_cancelled {
+                let _ = child.wait();
+                return vec!["^C [Process stopped by Esc]".to_string()];
+            }
+
+            match child.wait_with_output() {
                 Ok(output) => {
                     let mut lines = Vec::new();
                     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -260,9 +302,7 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
                     lines
                 }
-                Err(_e) => {
-                    vec![format!("{}: command not found", program)]
-                }
+                Err(e) => vec![format!("{}: execution failed ({})", program, e)],
             }
         }
     }

@@ -381,6 +381,8 @@ fn main() -> std::io::Result<()> {
                                                 let (tx, rx) = mpsc::channel();
                                                 let ai_cfg_bg = ai_cfg.clone();
                                                 let query_bg = query.clone();
+                                                let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                                                let cancel_bg = cancel_flag.clone();
                                                 std::thread::spawn(move || {
                                                     let storage = LocalStorage::new()
                                                         .unwrap_or_else(|_| {
@@ -398,7 +400,7 @@ fn main() -> std::io::Result<()> {
                                                         }
                                                     };
                                                     let res = rt.block_on(run_ai_command(
-                                                        ai_cmd, &query_bg, ai_cfg_bg, &storage,
+                                                         ai_cmd, &query_bg, ai_cfg_bg, &storage, Some(cancel_bg),
                                                     ));
                                                     let _ = tx.send(res);
                                                 });
@@ -439,17 +441,37 @@ fn main() -> std::io::Result<()> {
                                                             break;
                                                         }
                                                         Err(mpsc::TryRecvError::Empty) => {
-                                                            // Keep UI alive; drain input so it doesn't pile up.
+                                                            let mut user_cancelled = false;
                                                             while event::poll(
                                                                 std::time::Duration::from_millis(0),
                                                             )
                                                             .unwrap_or(false)
                                                             {
-                                                                let _ = event::read();
+                                                                if let Ok(Event::Key(key)) = event::read() {
+                                                                    if key.code == KeyCode::Esc
+                                                                        || (key.code == KeyCode::Char('c')
+                                                                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                                                                    {
+                                                                        user_cancelled = true;
+                                                                        break;
+                                                                    }
+                                                                }
                                                             }
+
+                                                            if user_cancelled {
+                                                                cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                                app.ai_loading = None;
+                                                                app.add_entry(Entry {
+                                                                    entry_type: EntryType::System,
+                                                                    content: vec!["^C [Process stopped by Esc]".to_string()],
+                                                                    cwd: String::new(),
+                                                                });
+                                                                break;
+                                                            }
+
                                                             std::thread::sleep(
                                                                 std::time::Duration::from_millis(
-                                                                    80,
+                                                                    60,
                                                                 ),
                                                             );
                                                         }

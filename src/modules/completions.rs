@@ -656,8 +656,17 @@ pub fn update_suggestions(app: &mut App) {
     if parsed.is_command_position {
         let token_lower = parsed.current_token.to_lowercase();
 
-        // If user is typing a path in command position (e.g. `./script.sh` or `/bin/ls`)
-        if parsed.current_token.contains('/') || parsed.current_token.starts_with('.') {
+        if parsed.current_token.starts_with('@') {
+            let path_part = &parsed.current_token[1..];
+            let (base_dir, prefix) = parse_dir_path(path_part);
+            let paths = complete_paths(&base_dir, &prefix, false);
+            for (completed_path, display) in paths {
+                let completed_at = format!("@{}", completed_path);
+                let display_at = format!("@{}{}", base_dir, display);
+                let full = format!("{}{}{}", parsed.line_prefix, completed_at, parsed.line_suffix);
+                suggestions.push((full, display_at));
+            }
+        } else if parsed.current_token.contains('/') || parsed.current_token.starts_with('.') {
             let (base_dir, prefix) = parse_dir_path(parsed.current_token);
             let paths = complete_paths(&base_dir, &prefix, false);
             for (completed_path, display) in paths {
@@ -702,7 +711,19 @@ pub fn update_suggestions(app: &mut App) {
         let is_flag = token.starts_with('-') || (cmd == "chmod" && token.starts_with('+'));
         let is_cd = matches!(cmd, "cd" | "rmdir" | "pushd");
 
-        if is_flag {
+        if token.starts_with('@') {
+            // Suggest files and directories with @ prefix for AI prompt reference
+            let path_part = &token[1..];
+            let (base_dir, prefix) = parse_dir_path(path_part);
+            let paths = complete_paths(&base_dir, &prefix, false);
+
+            for (completed_path, display) in paths {
+                let completed_at = format!("@{}", completed_path);
+                let display_at = format!("@{}{}", base_dir, display);
+                let full = format!("{}{}{}", parsed.line_prefix, completed_at, parsed.line_suffix);
+                suggestions.push((full, display_at));
+            }
+        } else if is_flag {
             // Suggest matching flags for the command
             let flags = get_command_flags(cmd, parsed.subcommand);
             for &(flag, desc) in flags {
@@ -1042,4 +1063,33 @@ mod tests {
             "Suggestions should remain intact after clear()"
         );
     }
+
+    #[test]
+    fn test_update_suggestions_at_reference() {
+        let mut app = App::new();
+        // Typing "build make landing page from @"
+        app.current_input = "build make landing page from @".to_string();
+        app.cursor_position = app.current_input.len();
+        update_suggestions(&mut app);
+        assert!(app.show_suggestions);
+        assert!(!app.current_suggestions.is_empty());
+        // All suggestions should start with @
+        for (full, display) in &app.current_suggestions {
+            assert!(full.contains('@'));
+            assert!(display.starts_with('@'));
+        }
+
+        // Typing "build make landing page from @Car"
+        app.current_input = "build make landing page from @Car".to_string();
+        app.cursor_position = app.current_input.len();
+        update_suggestions(&mut app);
+        assert!(app.show_suggestions);
+        assert!(
+            app.current_suggestions
+                .iter()
+                .any(|(full, _)| full.contains("@Cargo.toml")),
+            "Suggestions should include @Cargo.toml"
+        );
+    }
 }
+
