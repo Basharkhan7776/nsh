@@ -11,7 +11,7 @@ use crossterm::{
 };
 use nsh::{
     App, Entry, EntryType, Focus, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
-    SCROLL_STEP, Selection,
+    SCROLL_STEP, Selection, SudoPromptMode,
     ai::{
         ProviderType,
         agent::{AiCommand, run_ai_command},
@@ -95,6 +95,10 @@ fn main() -> std::io::Result<()> {
     // Initialize application state
     let mut app = App::new();
     app.load_history();
+    if let Ok(storage) = LocalStorage::new() {
+        let cfg = storage.load_or_create_config();
+        app.sudo_prompt_mode = cfg.sudo_prompt_mode;
+    }
     app.add_entry(Entry {
         entry_type: EntryType::System,
         content: vec![
@@ -149,6 +153,68 @@ fn main() -> std::io::Result<()> {
                                     let rt = tokio::runtime::Runtime::new().unwrap();
                                     app.settings_state.available_models =
                                         rt.block_on(fetch_models(provider, &base_url));
+                                    break;
+                                }
+
+                                // Sudo password modal input handling
+                                if app.show_sudo_prompt {
+                                    match key_code {
+                                        KeyCode::Esc => {
+                                            app.clear_sudo_state();
+                                            app.add_entry(Entry {
+                                                entry_type: EntryType::Output,
+                                                content: vec!["sudo: authentication cancelled".to_string()],
+                                                cwd: String::new(),
+                                            });
+                                        }
+                                        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                            app.clear_sudo_state();
+                                            app.add_entry(Entry {
+                                                entry_type: EntryType::Output,
+                                                content: vec!["sudo: authentication cancelled".to_string()],
+                                                cwd: String::new(),
+                                            });
+                                        }
+                                        KeyCode::Backspace => {
+                                            app.sudo_password.pop();
+                                            app.sudo_error = None;
+                                        }
+                                        KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                            app.sudo_password.clear();
+                                            app.sudo_error = None;
+                                        }
+                                        KeyCode::Enter => {
+                                            let password = std::mem::take(&mut app.sudo_password);
+                                            match nsh::validate_and_cache_sudo_password(&password) {
+                                                Ok(()) => {
+                                                    let cmd = app.pending_sudo_command.take().unwrap_or_default();
+                                                    app.clear_sudo_state();
+                                                    if !cmd.is_empty() {
+                                                        let output = nsh::execute_command(&cmd);
+                                                        if !output.is_empty() {
+                                                            let cwd = std::env::current_dir()
+                                                                .map(|p| p.to_string_lossy().to_string())
+                                                                .unwrap_or_else(|_| "~".to_string());
+                                                            app.add_entry(Entry {
+                                                                entry_type: EntryType::Output,
+                                                                content: output,
+                                                                cwd,
+                                                            });
+                                                        }
+                                                    }
+                                                }
+                                                Err(err) => {
+                                                    app.sudo_error = Some(err);
+                                                    app.sudo_password.clear();
+                                                }
+                                            }
+                                        }
+                                        KeyCode::Char(c) => {
+                                            app.sudo_password.push(c);
+                                            app.sudo_error = None;
+                                        }
+                                        _ => {}
+                                    }
                                     break;
                                 }
 
@@ -402,32 +468,76 @@ fn main() -> std::io::Result<()> {
                                                     }
                                                 }
                                             } else {
-                                                let output = nsh::execute_command(&input);
-                                                if output.iter().any(|s| s == "__SETTINGS__") {
-                                                    app.settings_state = load_settings_state();
-                                                    app.show_settings = true;
-                                                    app.settings_cursor = 0;
-                                                    app.settings_input.clear();
-                                                    app.settings_nav.clear();
+                                                if nsh::command_needs_sudo_password(&input) {
+                                                    let use_gui = match app.sudo_prompt_mode {
+                                                        SudoPromptMode::DesktopGui => true,
+                                                        SudoPromptMode::Auto => {
+                                                            std::env::var("DISPLAY").is_ok()
+                                                                || std::env::var("WAYLAND_DISPLAY").is_ok()
+                                                        }
+                                                        SudoPromptMode::TuiModal => false,
+                                                    };
 
-                                                    let base_url =
-                                                        app.settings_state.base_url.clone();
-                                                    let provider = app.settings_state.provider;
-                                                    let rt =
-                                                        tokio::runtime::Runtime::new().unwrap();
-                                                    app.settings_state.available_models = rt
-                                                        .block_on(fetch_models(
-                                                            provider, &base_url,
-                                                        ));
-                                                } else if output.iter().any(|s| s == "__CLEAR__") {
-                                                    app.clear();
-                                                    terminal.clear()?;
-                                                } else if !output.is_empty() {
-                                                    app.add_entry(Entry {
-                                                        entry_type: EntryType::Output,
-                                                        content: output,
-                                                        cwd: String::new(),
-                                                    });
+                                                    let mut handled_via_gui = false;
+                                                    if use_gui {
+                                                        if let Some(pass) = nsh::prompt_gui_password("Authentication Required") {
+                                                            handled_via_gui = true;
+                                                            match nsh::validate_and_cache_sudo_password(&pass) {
+                                                                Ok(()) => {
+                                                                    let output = nsh::execute_command(&input);
+                                                                    if !output.is_empty() {
+                                                                        app.add_entry(Entry {
+                                                                            entry_type: EntryType::Output,
+                                                                            content: output,
+                                                                            cwd: String::new(),
+                                                                        });
+                                                                    }
+                                                                }
+                                                                Err(err) => {
+                                                                    app.add_entry(Entry {
+                                                                        entry_type: EntryType::Output,
+                                                                        content: vec![err],
+                                                                        cwd: String::new(),
+                                                                    });
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if !handled_via_gui {
+                                                        app.pending_sudo_command = Some(input.clone());
+                                                        app.show_sudo_prompt = true;
+                                                        app.sudo_password.clear();
+                                                        app.sudo_error = None;
+                                                    }
+                                                } else {
+                                                    let output = nsh::execute_command(&input);
+                                                    if output.iter().any(|s| s == "__SETTINGS__") {
+                                                        app.settings_state = load_settings_state();
+                                                        app.show_settings = true;
+                                                        app.settings_cursor = 0;
+                                                        app.settings_input.clear();
+                                                        app.settings_nav.clear();
+
+                                                        let base_url =
+                                                            app.settings_state.base_url.clone();
+                                                        let provider = app.settings_state.provider;
+                                                        let rt =
+                                                            tokio::runtime::Runtime::new().unwrap();
+                                                        app.settings_state.available_models = rt
+                                                            .block_on(fetch_models(
+                                                                provider, &base_url,
+                                                            ));
+                                                    } else if output.iter().any(|s| s == "__CLEAR__") {
+                                                        app.clear();
+                                                        terminal.clear()?;
+                                                    } else if !output.is_empty() {
+                                                        app.add_entry(Entry {
+                                                            entry_type: EntryType::Output,
+                                                            content: output,
+                                                            cwd: String::new(),
+                                                        });
+                                                    }
                                                 }
                                             }
                                         }
@@ -698,7 +808,7 @@ fn main() -> std::io::Result<()> {
                                 let terminal_size = terminal.size().unwrap_or_default();
                                 let input_y = terminal_size.height.saturating_sub(if app.ai_loading.is_some() { 4 } else { 3 });
 
-                                if !app.show_settings {
+                                if !app.show_settings && !app.show_sudo_prompt {
                                     match mouse.kind {
                                         MouseEventKind::Down(MouseButton::Left) => {
                                             if mouse.row < input_y {

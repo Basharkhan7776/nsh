@@ -268,6 +268,105 @@ pub fn execute_command(input: &str) -> Vec<String> {
     }
 }
 
+/// Check if a command requires sudo authentication and credentials are not cached.
+pub fn command_needs_sudo_password(input: &str) -> bool {
+    let tokens = parse_command_line(input);
+    if tokens.is_empty() {
+        return false;
+    }
+
+    // Check if sudo is invoked as the command or in a chained command
+    let has_sudo = tokens.iter().any(|t| t == "sudo");
+    if !has_sudo {
+        return false;
+    }
+
+    // Check if sudo credentials are already cached non-interactively.
+    // `sudo -n true` exits 0 if cached ticket is valid, non-zero if password needed.
+    let check = std::process::Command::new("sudo")
+        .arg("-n")
+        .arg("true")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    match check {
+        Ok(status) => !status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Validate password via `sudo -S -v -p ""` to cache sudo credentials.
+pub fn validate_and_cache_sudo_password(password: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new("sudo")
+        .arg("-S")
+        .arg("-v")
+        .arg("-p")
+        .arg("")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to spawn sudo: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(password.as_bytes());
+        let _ = stdin.write_all(b"\n");
+        let _ = stdin.flush();
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("sudo error: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&output.stderr);
+        let msg = if err.trim().is_empty() {
+            "Authentication failed. Please try again.".to_string()
+        } else {
+            let first_line = err
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("Authentication failed. Please try again.");
+            first_line.trim().to_string()
+        };
+        Err(msg)
+    }
+}
+
+/// Try prompting for password using Linux desktop dialog (e.g. zenity).
+pub fn prompt_gui_password(title: &str) -> Option<String> {
+    use std::process::Command;
+
+    let has_display =
+        std::env::var("DISPLAY").is_ok() || std::env::var("WAYLAND_DISPLAY").is_ok();
+    if !has_display {
+        return None;
+    }
+
+    let output = Command::new("zenity")
+        .arg("--password")
+        .arg(format!("--title={}", title))
+        .output();
+
+    if let Ok(out) = output {
+        if out.status.success() {
+            let pass = String::from_utf8_lossy(&out.stdout)
+                .trim_end_matches(['\r', '\n'])
+                .to_string();
+            return Some(pass);
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,5 +424,13 @@ mod tests {
         assert!(has_unquoted_shell_metachars("cat file.txt | grep foo"));
         assert!(has_unquoted_shell_metachars("echo foo > bar.txt"));
         assert!(has_unquoted_shell_metachars("cargo check && cargo test"));
+    }
+
+    #[test]
+    fn test_command_needs_sudo_password_non_sudo() {
+        assert!(!command_needs_sudo_password("ls -la"));
+        assert!(!command_needs_sudo_password("git status"));
+        assert!(!command_needs_sudo_password("cargo check"));
+        assert!(!command_needs_sudo_password(""));
     }
 }

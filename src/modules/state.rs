@@ -3,6 +3,7 @@
 use super::completions::update_suggestions;
 use super::config::{MAX_VISIBLE_SUGGESTIONS, VISIBLE_HISTORY_LINES};
 use crate::ai::ProviderType;
+use serde::{Deserialize, Serialize};
 
 // Single line in command history
 #[derive(Clone)]
@@ -138,6 +139,14 @@ pub struct Selection {
     pub end: (u16, u16),   // (column, row)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum SudoPromptMode {
+    #[default]
+    TuiModal,
+    DesktopGui,
+    Auto,
+}
+
 // Application state
 pub struct App {
     pub entries: Vec<Entry>,                        // All history entries (screen rows)
@@ -164,6 +173,11 @@ pub struct App {
     pub focus: Focus,                               // Current focus: Input or Output
     pub selection: Option<Selection>,               // Active text selection in output
     pub status_message: Option<String>,             // Temporary status notification
+    pub show_sudo_prompt: bool,                     // Sudo password modal is active
+    pub sudo_password: String,                      // Password input buffer (wiped on submit/cancel)
+    pub pending_sudo_command: Option<String>,       // Original command waiting for sudo auth
+    pub sudo_error: Option<String>,                 // Sudo auth error message
+    pub sudo_prompt_mode: SudoPromptMode,           // Sudo prompt type (TuiModal / DesktopGui / Auto)
 }
 
 impl App {
@@ -194,7 +208,26 @@ impl App {
             focus: Focus::Input,
             selection: None,
             status_message: None,
+            show_sudo_prompt: false,
+            sudo_password: String::new(),
+            pending_sudo_command: None,
+            sudo_error: None,
+            sudo_prompt_mode: SudoPromptMode::default(),
         }
+    }
+
+    // Securely wipe and reset sudo password state
+    pub fn clear_sudo_state(&mut self) {
+        unsafe {
+            let vec = self.sudo_password.as_mut_vec();
+            for b in vec.iter_mut() {
+                *b = 0;
+            }
+        }
+        self.sudo_password.clear();
+        self.show_sudo_prompt = false;
+        self.pending_sudo_command = None;
+        self.sudo_error = None;
     }
 
     // Load command history from local persistent storage
@@ -518,5 +551,20 @@ mod tests {
         app.clear();
         assert!(app.entries.is_empty());
         assert_eq!(app.get_history_commands(), vec!["ls", "cargo check", "cargo test"]);
+    }
+
+    #[test]
+    fn test_clear_sudo_state() {
+        let mut app = App::new();
+        app.show_sudo_prompt = true;
+        app.sudo_password = "mypassword".to_string();
+        app.pending_sudo_command = Some("sudo ls".to_string());
+        app.sudo_error = Some("failed".to_string());
+
+        app.clear_sudo_state();
+        assert!(!app.show_sudo_prompt);
+        assert!(app.sudo_password.is_empty());
+        assert!(app.pending_sudo_command.is_none());
+        assert!(app.sudo_error.is_none());
     }
 }

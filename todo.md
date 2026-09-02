@@ -1,2 +1,1 @@
-- In provider think about can we proxy other harness like claude, codex cli, grok build, opencode and antigravity cli.
-- think about sudo commands will take pass open pop up for it for linux ui have for password input
+- AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible

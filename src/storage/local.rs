@@ -132,6 +132,8 @@ pub struct NshConfig {
     pub ai: AiConfig,
     #[serde(default)]
     pub rag: RagConfig,
+    #[serde(default)]
+    pub sudo_prompt_mode: crate::modules::state::SudoPromptMode,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]

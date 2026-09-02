@@ -25,6 +25,9 @@ pub fn render(
             render_settings(f, app);
         } else {
             render_shell(f, app);
+            if app.show_sudo_prompt {
+                render_sudo_password_modal(f, app);
+            }
         }
     })?;
     Ok(())
@@ -402,8 +405,8 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
         .block(input_block);
     f.render_widget(input_widget, input_area);
 
-    // Hide cursor while AI is loading or when output is focused.
-    if app.ai_loading.is_none() && app.focus == super::state::Focus::Input {
+    // Hide cursor while AI is loading, output is focused, or sudo prompt is active.
+    if app.ai_loading.is_none() && app.focus == super::state::Focus::Input && !app.show_sudo_prompt {
         let prompt_cols = PROMPT_TEXT.chars().count() as u16;
         let text_cols = before.chars().count() as u16;
         let cursor_x = input_area
@@ -1127,6 +1130,104 @@ fn render_enable_page(f: &mut ratatui::Frame, app: &App, inner: Rect) {
     }
 }
 
+pub fn compute_sudo_modal_area(screen: Rect) -> Rect {
+    let target_w: u16 = 54;
+    let target_h: u16 = 9;
+
+    let width = target_w.min(screen.width.saturating_sub(4)).max(32);
+    let height = target_h.min(screen.height.saturating_sub(2)).max(7);
+
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = (screen.height.saturating_sub(height)) / 2;
+
+    Rect::new(x, y, width, height)
+}
+
+pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
+    let modal_area = compute_sudo_modal_area(f.area());
+
+    // Clear cells underneath so background text doesn't bleed through
+    f.render_widget(Clear, modal_area);
+
+    let output_bg = Style::default().bg(OUTPUT_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White))
+        .style(output_bg);
+    f.render_widget(block, modal_area);
+
+    // Title on top border (no emojis, white, clean)
+    let title_line = Line::from(Span::styled(
+        " Authentication Required ",
+        Style::default().fg(Color::White),
+    ));
+    f.render_widget(
+        Paragraph::new(title_line),
+        Rect::new(modal_area.x + 2, modal_area.y, modal_area.width.saturating_sub(4), 1),
+    );
+
+    let inner = Rect::new(
+        modal_area.x + 2,
+        modal_area.y + 1,
+        modal_area.width.saturating_sub(4),
+        modal_area.height.saturating_sub(2),
+    );
+
+    let cmd_raw = app.pending_sudo_command.as_deref().unwrap_or("sudo");
+    let max_cmd_len = inner.width.saturating_sub(12) as usize;
+    let cmd_display = if cmd_raw.len() > max_cmd_len && max_cmd_len > 3 {
+        format!("{}...", &cmd_raw[..max_cmd_len - 3])
+    } else {
+        cmd_raw.to_string()
+    };
+
+    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+    let bullets = "•".repeat(app.sudo_password.chars().count());
+
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled("Command:  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(cmd_display, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled("User:     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(user, Style::default().fg(Color::White)),
+        ]),
+        Line::from(Span::raw("")),
+        Line::from(vec![
+            Span::styled("Password: ", Style::default().fg(Color::White)),
+            Span::styled(bullets, Style::default().fg(Color::White)),
+        ]),
+    ];
+
+    if let Some(err) = &app.sudo_error {
+        lines.push(Line::from(Span::styled(
+            format!(" {}", err),
+            Style::default().fg(Color::Rgb(220, 80, 80)),
+        )));
+    } else {
+        lines.push(Line::from(Span::raw("")));
+    }
+
+    lines.push(Line::from(vec![
+        Span::styled("[Enter] ", Style::default().fg(Color::White)),
+        Span::styled("Submit   ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Esc] ", Style::default().fg(Color::White)),
+        Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
+    ]));
+
+    f.render_widget(Paragraph::new(lines).style(output_bg), inner);
+
+    // Position the real terminal cursor at the end of the password bullets
+    let pass_len = app.sudo_password.chars().count() as u16;
+    let cursor_x = (inner.x + 10 + pass_len).min(inner.x + inner.width.saturating_sub(1));
+    let cursor_y = inner.y + 3;
+    f.set_cursor_position(Position {
+        x: cursor_x,
+        y: cursor_y,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1366,5 +1467,48 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let text = format!("{:?}", buffer);
         assert!(text.contains("Press i or enter to type"));
+    }
+
+    #[test]
+    fn test_compute_sudo_modal_area() {
+        let screen = Rect::new(0, 0, 100, 30);
+        let area = compute_sudo_modal_area(screen);
+        assert_eq!(area.width, 54);
+        assert_eq!(area.height, 9);
+        assert_eq!(area.x, (100 - 54) / 2);
+        assert_eq!(area.y, (30 - 9) / 2);
+
+        // Small screen clamping
+        let small = Rect::new(0, 0, 40, 10);
+        let small_area = compute_sudo_modal_area(small);
+        assert!(small_area.width <= 40);
+        assert!(small_area.height <= 10);
+    }
+
+    #[test]
+    fn test_render_sudo_password_modal() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.show_sudo_prompt = true;
+        app.pending_sudo_command = Some("sudo apt update".to_string());
+        app.sudo_password = "secretpass".to_string();
+
+        terminal
+            .draw(|f| {
+                render_sudo_password_modal(f, &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("Authentication Required"));
+        assert!(text.contains("Command:"));
+        assert!(text.contains("sudo apt update"));
+        assert!(text.contains("Password:"));
+        // Check that bullets are rendered
+        assert!(text.contains("••••••••••"));
+        assert!(text.contains("[Enter]"));
+        assert!(text.contains("[Esc]"));
     }
 }
