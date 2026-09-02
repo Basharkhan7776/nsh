@@ -2,7 +2,7 @@
 // Modify KEY_BINDINGS below to customize key combinations
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use super::state::App;
 
@@ -104,6 +104,7 @@ pub struct KeyBindings {
     pub execute: KeyCombo,
     pub page_down_suggestions: KeyCombo,
     pub open_settings: KeyCombo,
+    pub clear_screen: KeyCombo,
 }
 
 impl Default for KeyBindings {
@@ -148,6 +149,7 @@ impl Default for KeyBindings {
             cancel: KeyCombo::code(KeyCode::Esc),
             execute: KeyCombo::code(KeyCode::Enter),
             open_settings: KeyCombo::ctrl(','),
+            clear_screen: KeyCombo::ctrl('l'),
         }
     }
 }
@@ -205,6 +207,7 @@ pub enum Action {
     Complete,
     InsertChar(char),
     OpenSettings,
+    ClearScreen,
 }
 
 pub fn get_action(key_code: KeyCode, modifiers: KeyModifiers) -> Action {
@@ -327,6 +330,9 @@ pub fn get_action(key_code: KeyCode, modifiers: KeyModifiers) -> Action {
     if bindings.matches(key_code, modifiers, &bindings.open_settings) {
         return Action::OpenSettings;
     }
+    if bindings.matches(key_code, modifiers, &bindings.clear_screen) {
+        return Action::ClearScreen;
+    }
 
     // Character input (no modifiers or shift only for capitals)
     if let KeyCode::Char(c) = key_code {
@@ -342,9 +348,29 @@ pub fn get_action(key_code: KeyCode, modifiers: KeyModifiers) -> Action {
 // CLIPBOARD - System clipboard operations
 // ══════════════════════════════════════════════════════════════════════════════
 
+static PERSISTENT_CLIPBOARD: Mutex<Option<arboard::Clipboard>> = Mutex::new(None);
+
 pub fn copy_to_clipboard(text: &str) -> bool {
-    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-        clipboard.set_text(text).is_ok()
+    let mut guard = match PERSISTENT_CLIPBOARD.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if guard.is_none() {
+        *guard = arboard::Clipboard::new().ok();
+    }
+    if let Some(clipboard) = guard.as_mut() {
+        let ok = clipboard.set_text(text).is_ok();
+        #[cfg(any(
+            target_os = "linux",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        {
+            use arboard::{LinuxClipboardKind, SetExtLinux};
+            let _ = clipboard.set().clipboard(LinuxClipboardKind::Primary).text(text);
+        }
+        ok
     } else {
         false
     }
@@ -355,7 +381,11 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 /// On Linux also falls back to the primary selection (middle-click buffer),
 /// which is what many terminals fill when you select text.
 pub fn paste_from_clipboard() -> Option<String> {
-    let mut clipboard = arboard::Clipboard::new().ok()?;
+    let mut guard = PERSISTENT_CLIPBOARD.lock().ok()?;
+    if guard.is_none() {
+        *guard = arboard::Clipboard::new().ok();
+    }
+    let clipboard = guard.as_mut()?;
 
     if let Ok(t) = clipboard.get_text() {
         let t = t.trim_end_matches(['\r', '\n']).to_string();
@@ -556,6 +586,10 @@ pub fn execute_action(app: &mut App, action: Action) {
 
         Action::OpenSettings => {
             // Handled in main loop
+        }
+
+        Action::ClearScreen => {
+            // Handled in main loop (needs terminal access)
         }
 
         Action::InsertChar(c) => {

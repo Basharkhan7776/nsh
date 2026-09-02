@@ -1,6 +1,2 @@
-- [x] Other arg like cat wont get the suggestions for files same with rm -rf - no sugestion, no -rf - flags suggestions
-- [x] "do" wont do recursive operations like "do cd then touch new.md then ls" currently it give current directorys ls.
-- [x] Improve the settings UI (Grok Build style centered modal, live filter bar, two-column layout, radio picker, inline badges, footer shortcuts)
 - In provider think about can we proxy other harness like claude, codex cli, grok build, opencode and antigravity cli.
 - think about sudo commands will take pass open pop up for it for linux ui have for password input
--

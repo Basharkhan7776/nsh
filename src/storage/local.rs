@@ -66,7 +66,59 @@ impl LocalStorage {
     pub fn save_config(&self, config: &NshConfig) -> Result<(), StorageError> {
         self.save("config.json", config)
     }
+    pub fn history_path(&self) -> PathBuf {
+        self.base_path.join("history.txt")
+    }
+
+    pub fn load_history(&self) -> Vec<String> {
+        let path = self.history_path();
+        if !path.exists() {
+            return Vec::new();
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(content) => {
+                let lines: Vec<String> = content
+                    .lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect();
+                if lines.len() > MAX_HISTORY_ENTRIES {
+                    lines[lines.len() - MAX_HISTORY_ENTRIES..].to_vec()
+                } else {
+                    lines
+                }
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn append_history(&self, cmd: &str) -> Result<(), StorageError> {
+        use std::io::Write;
+        let path = self.history_path();
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        writeln!(file, "{}", cmd)?;
+        Ok(())
+    }
+
+    pub fn save_history(&self, history: &[String]) -> Result<(), StorageError> {
+        let path = self.history_path();
+        let start = if history.len() > MAX_HISTORY_ENTRIES {
+            history.len() - MAX_HISTORY_ENTRIES
+        } else {
+            0
+        };
+        let slice = &history[start..];
+        let content = slice.join("\n") + "\n";
+        std::fs::write(path, content)?;
+        Ok(())
+    }
 }
+
+pub const MAX_HISTORY_ENTRIES: usize = 10_000;
 
 impl Default for LocalStorage {
     fn default() -> Self {
@@ -95,5 +147,32 @@ impl LocalStorage {
             let _ = self.save_config(&config);
             config
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_local_storage_history_roundtrip() {
+        let temp_dir = std::env::temp_dir().join(format!("nsh_test_history_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let storage = LocalStorage { base_path: temp_dir.clone() };
+
+        // Starts empty if no file
+        let history = storage.load_history();
+        assert!(history.is_empty());
+
+        // Append commands
+        storage.append_history("git status").unwrap();
+        storage.append_history("cargo check").unwrap();
+        storage.append_history("cargo test").unwrap();
+
+        let loaded = storage.load_history();
+        assert_eq!(loaded, vec!["git status", "cargo check", "cargo test"]);
+
+        // Clean up
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

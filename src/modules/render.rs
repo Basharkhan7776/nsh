@@ -10,7 +10,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
+    widgets::{
+        Block, Borders, Clear, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState,
+    },
 };
 
 pub fn render(
@@ -159,6 +162,64 @@ fn build_display_rows(app: &App, width: usize) -> Vec<DisplayRow> {
     rows
 }
 
+pub fn extract_selected_text(
+    app: &App,
+    width: usize,
+    list_area_y: u16,
+    visible_height: usize,
+) -> Option<String> {
+    let sel = app.selection?;
+    if sel.start == sel.end {
+        return None;
+    }
+
+    let ((r1, c1), (r2, c2)) = if sel.start.1 < sel.end.1 || (sel.start.1 == sel.end.1 && sel.start.0 <= sel.end.0) {
+        ((sel.start.1, sel.start.0), (sel.end.1, sel.end.0))
+    } else {
+        ((sel.end.1, sel.end.0), (sel.start.1, sel.start.0))
+    };
+
+    let display_rows = build_display_rows(app, width);
+    let mut selected_lines = Vec::new();
+
+    for y in r1..=r2 {
+        if y < list_area_y {
+            continue;
+        }
+        let rel_y = (y - list_area_y) as usize;
+        if rel_y >= visible_height {
+            break;
+        }
+        let row_idx = app.scroll_offset + rel_y;
+        if row_idx >= display_rows.len() {
+            break;
+        }
+
+        let text = &display_rows[row_idx].text;
+        let char_count = text.chars().count();
+        if char_count == 0 {
+            selected_lines.push(String::new());
+            continue;
+        }
+
+        let from_col = if y == r1 { (c1 as usize).min(char_count) } else { 0 };
+        let to_col = if y == r2 { ((c2 as usize) + 1).min(char_count) } else { char_count };
+
+        if from_col < to_col {
+            let slice: String = text.chars().skip(from_col).take(to_col - from_col).collect();
+            selected_lines.push(slice);
+        } else {
+            selected_lines.push(String::new());
+        }
+    }
+
+    if selected_lines.is_empty() || (selected_lines.len() == 1 && selected_lines[0].is_empty()) {
+        None
+    } else {
+        Some(selected_lines.join("\n"))
+    }
+}
+
 fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     let output_bg = Style::default().bg(OUTPUT_BG);
     let output_fg = Style::default().fg(OUTPUT_FG).bg(OUTPUT_BG);
@@ -188,7 +249,16 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
         .constraints(constraints)
         .split(f.area());
 
-    let list_area = chunks[0];
+    let (list_area, scrollbar_area) = if chunks[0].width > 2 {
+        let h_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .split(chunks[0]);
+        (h_chunks[0], Some(h_chunks[1]))
+    } else {
+        (chunks[0], None)
+    };
+
     let (status_area, input_area) = if loading {
         (Some(chunks[1]), chunks[2])
     } else {
@@ -216,27 +286,90 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     let start_line = app.scroll_offset;
     let end_line = (start_line + visible_height).min(content_height);
 
+    let sel_coords = app.selection.map(|sel| {
+        if sel.start.1 < sel.end.1 || (sel.start.1 == sel.end.1 && sel.start.0 <= sel.end.0) {
+            ((sel.start.1, sel.start.0), (sel.end.1, sel.end.0))
+        } else {
+            ((sel.end.1, sel.end.0), (sel.start.1, sel.start.0))
+        }
+    });
+    let sel_style = Style::default().bg(Color::Rgb(60, 60, 60)).fg(Color::White);
+
     let mut items: Vec<ListItem> = Vec::new();
-    for row in display_rows.iter().take(end_line).skip(start_line) {
-        let line = match row.kind {
-            EntryType::Command => {
-                if let (Some(cwd), Some(rest)) = (&row.cmd_cwd, &row.cmd_rest) {
+    for (y_idx, row) in display_rows.iter().take(end_line).skip(start_line).enumerate() {
+        let screen_y = list_area.y + (y_idx as u16);
+        let base_style = match row.kind {
+            EntryType::Command => cmd_style,
+            EntryType::Output => output_fg,
+            EntryType::System => system_style,
+        };
+
+        let is_selected = sel_coords.map_or(false, |((r1, _), (r2, _))| screen_y >= r1 && screen_y <= r2);
+
+        let line = if is_selected {
+            if let Some(((r1, c1), (r2, c2))) = sel_coords {
+                let char_count = row.text.chars().count();
+                let from_col = if screen_y == r1 { (c1 as usize).min(char_count) } else { 0 };
+                let to_col = if screen_y == r2 { ((c2 as usize) + 1).min(char_count) } else { char_count };
+
+                if from_col < to_col && from_col < char_count {
+                    let before: String = row.text.chars().take(from_col).collect();
+                    let selected: String = row.text.chars().skip(from_col).take(to_col - from_col).collect();
+                    let after: String = row.text.chars().skip(to_col).collect();
+
                     Line::from(vec![
-                        Span::styled(cwd.clone(), cwd_style),
-                        Span::styled(rest.clone(), cmd_style),
+                        Span::styled(before, base_style),
+                        Span::styled(selected, sel_style),
+                        Span::styled(after, base_style),
                     ])
                 } else {
-                    Line::from(Span::styled(row.text.as_str(), cmd_style))
+                    Line::from(Span::styled(row.text.as_str(), base_style))
                 }
+            } else {
+                Line::from(Span::styled(row.text.as_str(), base_style))
             }
-            EntryType::Output => Line::from(Span::styled(row.text.as_str(), output_fg)),
-            EntryType::System => Line::from(Span::styled(row.text.as_str(), system_style)),
+        } else {
+            match row.kind {
+                EntryType::Command => {
+                    if let (Some(cwd), Some(rest)) = (&row.cmd_cwd, &row.cmd_rest) {
+                        Line::from(vec![
+                            Span::styled(cwd.clone(), cwd_style),
+                            Span::styled(rest.clone(), cmd_style),
+                        ])
+                    } else {
+                        Line::from(Span::styled(row.text.as_str(), cmd_style))
+                    }
+                }
+                EntryType::Output => Line::from(Span::styled(row.text.as_str(), output_fg)),
+                EntryType::System => Line::from(Span::styled(row.text.as_str(), system_style)),
+            }
         };
         items.push(ListItem::new(line));
     }
 
-    let list = List::new(items).style(output_bg);
+    // Blank list_area with output_bg so previous lines are never left behind on clear
+    f.render_widget(Block::default().style(output_bg), list_area);
+    let list = List::new(items)
+        .block(Block::default().style(output_bg))
+        .style(output_bg);
     f.render_widget(list, list_area);
+
+    // Render rightmost scrollbar gutter and track
+    if let Some(sb_area) = scrollbar_area {
+        f.render_widget(Block::default().style(output_bg), sb_area);
+        if content_height > visible_height {
+            let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(None)
+                .thumb_symbol("▕")
+                .thumb_style(Style::default().fg(Color::Rgb(90, 90, 90)).bg(OUTPUT_BG));
+
+            let mut scrollbar_state = ScrollbarState::new(content_height.saturating_sub(visible_height))
+                .position(app.scroll_offset);
+            f.render_stateful_widget(scrollbar, sb_area, &mut scrollbar_state);
+        }
+    }
 
     // Animated AI loading bar (ask / do / plan / build).
     if let (Some(area), Some(loading)) = (status_area, app.ai_loading.as_ref()) {
@@ -245,13 +378,15 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     }
 
     // Real terminal cursor (no fake "|" glyph). Top padding is 1 row.
-    // While AI is loading, dim the input and show a wait hint.
+    // While AI is loading or in Output focus, dim/inform the input area.
     let pad_top: u16 = 1;
     let pad_left: u16 = 0;
     let cursor_byte = app.cursor_position.min(app.current_input.len());
     let before = &app.current_input[..cursor_byte];
     let (prompt, body) = if app.ai_loading.is_some() {
         (" … ", "(AI is working — wait for response)")
+    } else if app.focus == super::state::Focus::Output {
+        ("", "Press i or enter to type")
     } else {
         (PROMPT_TEXT, app.current_input.as_str())
     };
@@ -267,8 +402,8 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
         .block(input_block);
     f.render_widget(input_widget, input_area);
 
-    // Hide cursor while AI is loading (input is disabled).
-    if app.ai_loading.is_none() {
+    // Hide cursor while AI is loading or when output is focused.
+    if app.ai_loading.is_none() && app.focus == super::state::Focus::Input {
         let prompt_cols = PROMPT_TEXT.chars().count() as u16;
         let text_cols = before.chars().count() as u16;
         let cursor_x = input_area
@@ -288,7 +423,11 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
-    if app.ai_loading.is_none() && app.show_suggestions && !app.current_suggestions.is_empty() {
+    if app.ai_loading.is_none()
+        && app.focus == super::state::Focus::Input
+        && app.show_suggestions
+        && !app.current_suggestions.is_empty()
+    {
         let visible = app.visible_suggestions();
         let has_more = app.has_more_suggestions();
 
@@ -991,6 +1130,7 @@ fn render_enable_page(f: &mut ratatui::Frame, app: &App, inner: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Entry, Focus, Selection};
     use ratatui::backend::TestBackend;
 
     #[test]
@@ -1128,5 +1268,103 @@ mod tests {
         app.settings_reset_filter();
         assert!(app.settings_filter.is_empty());
         assert!(!app.settings_filter_active);
+    }
+
+    #[test]
+    fn test_render_shell_right_scrollbar() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        // Add enough entries so content_height > visible_height
+        for i in 0..40 {
+            app.add_entry(Entry {
+                entry_type: EntryType::Output,
+                content: vec![format!("Line output {}", i)],
+                cwd: String::new(),
+            });
+        }
+
+        terminal
+            .draw(|f| {
+                render_shell(f, &mut app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Check that rightmost column (col 79) contains scrollbar track or thumb symbols
+        let right_col = buffer.area.width - 1;
+        let col_symbols: Vec<&str> = (0..17)
+            .map(|y| buffer[(right_col, y)].symbol())
+            .collect();
+        assert!(
+            col_symbols.iter().any(|&s| s == "▕"),
+            "Rightmost column should contain minimal scrollbar thumb '▕', got: {:?}",
+            col_symbols
+        );
+    }
+
+    #[test]
+    fn test_extract_selected_text_single_and_multi_line() {
+        let mut app = App::new();
+        app.add_entry(Entry {
+            entry_type: EntryType::Output,
+            content: vec![
+                "first line of text".to_string(),
+                "second line of text".to_string(),
+                "third line of text".to_string(),
+            ],
+            cwd: String::new(),
+        });
+
+        // Single line selection: "line" from "first line of text" (columns 6..9 inclusive)
+        app.selection = Some(Selection {
+            start: (6, 0),
+            end: (9, 0),
+        });
+        let extracted = extract_selected_text(&app, 80, 0, 10);
+        assert_eq!(extracted, Some("line".to_string()));
+
+        // Multi-line selection: from column 6 on row 0 to column 5 on row 1
+        app.selection = Some(Selection {
+            start: (6, 0),
+            end: (5, 1),
+        });
+        let multi = extract_selected_text(&app, 80, 0, 10);
+        assert_eq!(multi, Some("line of text\nsecond".to_string()));
+
+        // Single point click (no drag) returns None
+        app.selection = Some(Selection {
+            start: (3, 0),
+            end: (3, 0),
+        });
+        assert_eq!(extract_selected_text(&app, 80, 0, 10), None);
+    }
+
+    #[test]
+    fn test_render_output_focus_and_selection() {
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.focus = Focus::Output;
+        app.add_entry(Entry {
+            entry_type: EntryType::Output,
+            content: vec!["alpha beta gamma".to_string()],
+            cwd: String::new(),
+        });
+        app.selection = Some(Selection {
+            start: (0, 0),
+            end: (4, 0),
+        });
+
+        terminal
+            .draw(|f| {
+                render_shell(f, &mut app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("Press i or enter to type"));
     }
 }

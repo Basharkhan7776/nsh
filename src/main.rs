@@ -10,12 +10,13 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use nsh::{
-    App, Entry, EntryType, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP, SCROLL_STEP,
+    App, Entry, EntryType, Focus, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
+    SCROLL_STEP, Selection,
     ai::{
         ProviderType,
         agent::{AiCommand, run_ai_command},
     },
-    fetch_models,
+    extract_selected_text, fetch_models,
     keybindings::{Action, execute_action, get_action},
     modules::state::{AiLoadingState, SettingsField, SettingsPage},
     rag::RagEngine,
@@ -81,62 +82,35 @@ fn save_settings_state(state: &nsh::modules::state::SettingsState) {
     let _ = storage.save_config(&config);
 }
 
-fn set_mouse_capture(
-    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
-    enable: bool,
-) -> std::io::Result<()> {
-    if enable {
-        execute!(terminal.backend_mut(), EnableMouseCapture)?;
-    } else {
-        execute!(terminal.backend_mut(), DisableMouseCapture)?;
-    }
-    Ok(())
-}
-
 fn main() -> std::io::Result<()> {
-    // Initialize terminal for alternate screen buffer.
-    // Do NOT enable mouse capture by default — it steals mouse events from the
-    // terminal emulator and prevents drag-select / copy of output text.
-    // Mouse capture is toggled on only while the settings UI is open.
-    //
-    // Enable bracketed paste so Ctrl+Shift+V / right-click paste arrives as a
-    // single Event::Paste (required for pasting API keys into settings).
+    // Initialize terminal for alternate screen buffer with bracketed paste and mouse capture.
+    // Mouse capture allows smooth mouse scrolling, click-to-focus on output, and drag text selection.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste)?;
+    execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     // Initialize application state
     let mut app = App::new();
+    app.load_history();
     app.add_entry(Entry {
         entry_type: EntryType::System,
         content: vec![
             "Welcome to nsh - AI-Powered Shell".to_string(),
             "Type 'help' for commands".to_string(),
-            "Use Tab for autocomplete, Up/Down for history, PageUp/PageDown to scroll".to_string(),
-            "Select text with the mouse to copy (terminal selection). Ctrl+Shift+C copies input/last output.".to_string(),
+            "Use Tab for autocomplete / toggle focus, Up/Down for history, mouse wheel to scroll".to_string(),
+            "Click output to focus & scroll. Drag to copy. Click input (or press 'i'/Enter) to type.".to_string(),
             "Type 'settings' or Ctrl+, for AI provider/model.  ask / do / plan / build + RAG ready.".to_string(),
         ],
         cwd: "~".to_string(),
     });
 
     let mut running = true;
-    let mut mouse_captured = false;
 
     // Main event loop - processes keyboard and mouse input
     while running {
-        // Keep mouse capture in sync with settings (clicks only needed there).
-        // Leaving it off in the shell lets the terminal handle text selection.
-        if app.show_settings && !mouse_captured {
-            set_mouse_capture(&mut terminal, true)?;
-            mouse_captured = true;
-        } else if !app.show_settings && mouse_captured {
-            set_mouse_capture(&mut terminal, false)?;
-            mouse_captured = false;
-        }
-
         render(&mut terminal, &mut app)?;
 
         loop {
@@ -155,31 +129,86 @@ fn main() -> std::io::Result<()> {
                                     break;
                                 }
 
-                                let cwd = std::env::current_dir()
-                                    .map(|p| p.to_string_lossy().to_string())
-                                    .unwrap_or_else(|_| "~".to_string());
-
-                                // Many terminals encode Alt+Key as Esc then Key (two events).
-                                // Peek briefly after bare Esc and promote the next key to Alt.
                                 let (key_code, modifiers) =
                                     resolve_key_with_alt_meta(key.code, key.modifiers);
                                 let action = get_action(key_code, modifiers);
 
+                                // Global action: Open settings
+                                if action == Action::OpenSettings {
+                                    app.settings_state = load_settings_state();
+                                    app.show_settings = true;
+                                    app.settings_cursor = 0;
+                                    app.settings_input.clear();
+                                    app.settings_nav.clear();
+                                    app.focus = Focus::Input;
+                                    app.selection = None;
+
+                                    // Fetch models for current provider
+                                    let base_url = app.settings_state.base_url.clone();
+                                    let provider = app.settings_state.provider;
+                                    let rt = tokio::runtime::Runtime::new().unwrap();
+                                    app.settings_state.available_models =
+                                        rt.block_on(fetch_models(provider, &base_url));
+                                    break;
+                                }
+
+                                // Output focus mode (review / scroll / select)
+                                if app.focus == Focus::Output {
+                                    match key_code {
+                                        KeyCode::Esc | KeyCode::Char('i') | KeyCode::Enter | KeyCode::Char('q') => {
+                                            app.focus = Focus::Input;
+                                            app.selection = None;
+                                            app.status_message = None;
+                                        }
+                                        KeyCode::Up | KeyCode::Char('k') => {
+                                            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+                                        }
+                                        KeyCode::Down | KeyCode::Char('j') => {
+                                            let max_scroll = app.total_lines.saturating_sub(1);
+                                            app.scroll_offset = (app.scroll_offset + 1).min(max_scroll);
+                                        }
+                                        KeyCode::PageUp => {
+                                            app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_STEP);
+                                        }
+                                        KeyCode::PageDown => {
+                                            let max_scroll = app.total_lines.saturating_sub(1);
+                                            app.scroll_offset = (app.scroll_offset + SCROLL_STEP).min(max_scroll);
+                                        }
+                                        KeyCode::Char('g') => {
+                                            app.scroll_offset = 0;
+                                        }
+                                        KeyCode::Char('G') => {
+                                            app.scroll_offset = app.total_lines.saturating_sub(1);
+                                        }
+                                        KeyCode::Tab => {
+                                            app.focus = Focus::Input;
+                                            app.selection = None;
+                                        }
+                                        _ => {
+                                            if action == Action::Interrupt || action == Action::Eof {
+                                                running = false;
+                                            }
+                                        }
+                                    }
+                                    break;
+                                }
+
+                                // Input focus mode - Tab when input is empty toggles focus to output
+                                if key_code == KeyCode::Tab && app.current_input.is_empty() && !app.show_suggestions {
+                                    app.focus = Focus::Output;
+                                    break;
+                                }
+                                app.status_message = None;
+
+                                let cwd = std::env::current_dir()
+                                    .map(|p| p.to_string_lossy().to_string())
+                                    .unwrap_or_else(|_| "~".to_string());
+
                                 // Handle special actions that need cwd or custom logic
                                 match action {
-                                    Action::OpenSettings => {
-                                        app.settings_state = load_settings_state();
-                                        app.show_settings = true;
-                                        app.settings_cursor = 0;
-                                        app.settings_input.clear();
-                                        app.settings_nav.clear();
-
-                                        // Fetch models for current provider
-                                        let base_url = app.settings_state.base_url.clone();
-                                        let provider = app.settings_state.provider;
-                                        let rt = tokio::runtime::Runtime::new().unwrap();
-                                        app.settings_state.available_models =
-                                            rt.block_on(fetch_models(provider, &base_url));
+                                    Action::ClearScreen => {
+                                        app.clear();
+                                        terminal.clear()?;
                                     }
                                     Action::Interrupt => {
                                         app.add_entry(Entry {
@@ -392,6 +421,7 @@ fn main() -> std::io::Result<()> {
                                                         ));
                                                 } else if output.iter().any(|s| s == "__CLEAR__") {
                                                     app.clear();
+                                                    terminal.clear()?;
                                                 } else if !output.is_empty() {
                                                     app.add_entry(Entry {
                                                         entry_type: EntryType::Output,
@@ -665,6 +695,49 @@ fn main() -> std::io::Result<()> {
                                         }
                                     }
                                 }
+                                let terminal_size = terminal.size().unwrap_or_default();
+                                let input_y = terminal_size.height.saturating_sub(if app.ai_loading.is_some() { 4 } else { 3 });
+
+                                if !app.show_settings {
+                                    match mouse.kind {
+                                        MouseEventKind::Down(MouseButton::Left) => {
+                                            if mouse.row < input_y {
+                                                // Clicked on output area -> focus output and begin selection
+                                                app.focus = Focus::Output;
+                                                app.status_message = None;
+                                                app.selection = Some(Selection {
+                                                    start: (mouse.column, mouse.row),
+                                                    end: (mouse.column, mouse.row),
+                                                });
+                                            } else {
+                                                // Clicked on input area -> focus input and clear selection
+                                                app.focus = Focus::Input;
+                                                app.selection = None;
+                                                app.status_message = None;
+                                            }
+                                        }
+                                        MouseEventKind::Drag(MouseButton::Left) => {
+                                            if let Some(sel) = &mut app.selection {
+                                                sel.end = (mouse.column, mouse.row);
+                                            }
+                                        }
+                                        MouseEventKind::Up(MouseButton::Left) => {
+                                            if let Some(sel) = app.selection {
+                                                if sel.start != sel.end {
+                                                    let wrap_width = terminal_size.width.saturating_sub(1) as usize;
+                                                    let visible_height = input_y as usize;
+                                                    if let Some(text) = extract_selected_text(&app, wrap_width, 0, visible_height) {
+                                                        nsh::keybindings::copy_to_clipboard(&text);
+                                                    }
+                                                } else {
+                                                    app.selection = None;
+                                                }
+                                            }
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
                                 // Middle-click paste (primary selection) into editable settings.
                                 if app.show_settings
                                     && mouse.kind == MouseEventKind::Down(MouseButton::Middle)
@@ -674,18 +747,23 @@ fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 if mouse.kind == MouseEventKind::ScrollUp {
-                                    if app.show_suggestions && app.has_more_suggestions() {
+                                    if app.show_settings {
+                                        app.settings_move_up();
+                                    } else if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_up();
                                     } else {
                                         app.scroll_offset =
                                             app.scroll_offset.saturating_sub(MOUSE_SCROLL_STEP);
                                     }
                                 } else if mouse.kind == MouseEventKind::ScrollDown {
-                                    if app.show_suggestions && app.has_more_suggestions() {
+                                    if app.show_settings {
+                                        app.settings_move_down();
+                                    } else if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_down();
                                     } else {
+                                        let max_scroll = app.total_lines.saturating_sub(1);
                                         app.scroll_offset = (app.scroll_offset + MOUSE_SCROLL_STEP)
-                                            .min(app.total_lines.saturating_sub(1));
+                                            .min(max_scroll);
                                     }
                                 }
                                 break;
@@ -704,15 +782,13 @@ fn main() -> std::io::Result<()> {
     }
 
     // Cleanup - restore terminal to normal mode
-    if mouse_captured {
-        let _ = set_mouse_capture(&mut terminal, false);
-    }
-    disable_raw_mode()?;
-    execute!(
+    let _ = execute!(
         terminal.backend_mut(),
+        DisableMouseCapture,
         DisableBracketedPaste,
         LeaveAlternateScreen
-    )?;
+    );
+    disable_raw_mode()?;
     println!("\nGoodbye!");
     Ok(())
 }

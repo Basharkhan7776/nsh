@@ -681,18 +681,14 @@ pub fn update_suggestions(app: &mut App) {
                 }
             }
 
-            // Add matching commands from history
-            for entry in app.entries.iter().rev() {
-                if entry.entry_type == super::state::EntryType::Command {
-                    if let Some(cmd) = entry.content.first() {
-                        let cmd_lower = cmd.to_lowercase();
-                        if cmd_lower.starts_with(&token_lower)
-                            && !suggestions.iter().any(|s| s.1 == *cmd)
-                        {
-                            let full = format!("{}{}{}", parsed.line_prefix, cmd, parsed.line_suffix);
-                            suggestions.push((full, cmd.clone()));
-                        }
-                    }
+            // Add matching commands from persistent history
+            for cmd in app.command_history.iter().rev() {
+                let cmd_lower = cmd.to_lowercase();
+                if cmd_lower.starts_with(&token_lower)
+                    && !suggestions.iter().any(|s| s.1 == *cmd)
+                {
+                    let full = format!("{}{}{}", parsed.line_prefix, cmd, parsed.line_suffix);
+                    suggestions.push((full, cmd.clone()));
                 }
                 if suggestions.len() >= 30 {
                     break;
@@ -749,6 +745,25 @@ pub fn update_suggestions(app: &mut App) {
                 for &(flag, desc) in flags.iter().take(6) {
                     let full = format!("{}{}{} ", parsed.line_prefix, flag, parsed.line_suffix);
                     suggestions.push((full, desc.to_string()));
+                }
+            }
+        }
+
+        // Also suggest matching full commands from history that start with current input prefix
+        let input_prefix = format!("{}{}", parsed.line_prefix, parsed.current_token);
+        let input_prefix_lower = input_prefix.to_lowercase();
+        if !input_prefix_lower.is_empty() {
+            for cmd in app.command_history.iter().rev() {
+                let cmd_lower = cmd.to_lowercase();
+                if cmd_lower.starts_with(&input_prefix_lower)
+                    && cmd != &input_prefix
+                    && !suggestions.iter().any(|s| s.0 == *cmd)
+                {
+                    let full = format!("{}{}", cmd, parsed.line_suffix);
+                    suggestions.push((full, cmd.clone()));
+                }
+                if suggestions.len() >= 30 {
+                    break;
                 }
             }
         }
@@ -982,5 +997,49 @@ mod tests {
 
         assert_eq!(app.current_input, "rm -rf ");
         assert_eq!(app.cursor_position, 7);
+    }
+
+    #[test]
+    fn test_update_suggestions_from_command_history_and_clear() {
+        let mut app = App::new();
+        app.add_command_history("git commit -m \"feat: test message\"");
+        app.add_command_history("docker ps -a");
+
+        // Typing "doc" should suggest "docker ps -a"
+        app.current_input = "doc".to_string();
+        app.cursor_position = 3;
+        update_suggestions(&mut app);
+        assert!(app.show_suggestions);
+        assert!(
+            app.current_suggestions
+                .iter()
+                .any(|(full, _)| full.starts_with("docker ps -a")),
+            "Suggestions should include docker command from history"
+        );
+
+        // Typing "git commit " in argument position should suggest the full command from history
+        app.current_input = "git commit ".to_string();
+        app.cursor_position = 11;
+        update_suggestions(&mut app);
+        assert!(app.show_suggestions);
+        assert!(
+            app.current_suggestions
+                .iter()
+                .any(|(full, _)| full.starts_with("git commit -m \"feat: test message\"")),
+            "Suggestions should include full git commit command from history"
+        );
+
+        // Running clear() should leave command_history and suggestions completely intact
+        app.clear();
+        app.current_input = "git commit ".to_string();
+        app.cursor_position = 11;
+        update_suggestions(&mut app);
+        assert!(app.show_suggestions);
+        assert!(
+            app.current_suggestions
+                .iter()
+                .any(|(full, _)| full.starts_with("git commit -m \"feat: test message\"")),
+            "Suggestions should remain intact after clear()"
+        );
     }
 }

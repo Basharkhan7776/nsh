@@ -280,6 +280,7 @@ mod tests {
 
     #[test]
     fn test_touch_creates_file() {
+        let _guard = TEST_CWD_LOCK.lock().unwrap();
         let test_file = "test_touch_file.tmp";
         if Path::new(test_file).exists() {
             let _ = std::fs::remove_file(test_file);

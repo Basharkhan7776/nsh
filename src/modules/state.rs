@@ -126,9 +126,22 @@ impl AiLoadingState {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Focus {
+    Input,
+    Output,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    pub start: (u16, u16), // (column, row)
+    pub end: (u16, u16),   // (column, row)
+}
+
 // Application state
 pub struct App {
-    pub entries: Vec<Entry>,                        // All history entries
+    pub entries: Vec<Entry>,                        // All history entries (screen rows)
+    pub command_history: Vec<String>,               // Persistent command history for suggestions & Up/Down
     pub current_input: String,                      // Current input buffer
     pub cursor_position: usize,                     // Cursor position in input
     pub scroll_offset: usize,                       // Output scroll position
@@ -148,6 +161,9 @@ pub struct App {
     pub settings_filter: String,                    // Search filter for settings
     pub settings_filter_active: bool,               // Whether filter input is active
     pub ai_loading: Option<AiLoadingState>,         // Active AI request spinner
+    pub focus: Focus,                               // Current focus: Input or Output
+    pub selection: Option<Selection>,               // Active text selection in output
+    pub status_message: Option<String>,             // Temporary status notification
 }
 
 impl App {
@@ -155,6 +171,7 @@ impl App {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
+            command_history: Vec::new(),
             current_input: String::new(),
             cursor_position: 0,
             scroll_offset: 0,
@@ -174,11 +191,51 @@ impl App {
             settings_filter: String::new(),
             settings_filter_active: false,
             ai_loading: None,
+            focus: Focus::Input,
+            selection: None,
+            status_message: None,
+        }
+    }
+
+    // Load command history from local persistent storage
+    pub fn load_history(&mut self) {
+        if let Ok(storage) = crate::storage::LocalStorage::new() {
+            self.command_history = storage.load_history();
+        }
+    }
+
+    // Add command to history (ignoring consecutive duplicates, saving to persistent storage)
+    pub fn add_command_history(&mut self, cmd: &str) {
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        // Avoid consecutive duplicate commands
+        if self.command_history.last().map(|s| s.as_str()) == Some(trimmed) {
+            return;
+        }
+
+        self.command_history.push(trimmed.to_string());
+        if self.command_history.len() > crate::storage::local::MAX_HISTORY_ENTRIES {
+            self.command_history.remove(0);
+        }
+
+        // Only persist to disk if command does NOT start with a leading space (privacy safeguard)
+        if !cmd.starts_with(' ') {
+            if let Ok(storage) = crate::storage::LocalStorage::new() {
+                let _ = storage.append_history(trimmed);
+            }
         }
     }
 
     // Add entry to history and update derived state
     pub fn add_entry(&mut self, entry: Entry) {
+        if entry.entry_type == EntryType::Command {
+            if let Some(first) = entry.content.first() {
+                self.add_command_history(first);
+            }
+        }
         self.entries.push(entry);
         self.recalc_total_lines();
         self.scroll_to_bottom();
@@ -189,7 +246,7 @@ impl App {
         self.total_lines = self.entries.iter().map(|e| e.content.len()).sum();
     }
 
-    // Clear all history
+    // Clear all visual screen buffer (keeps command_history intact!)
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_lines = 0;
@@ -207,13 +264,9 @@ impl App {
         VISIBLE_HISTORY_LINES
     }
 
-    // Extract command strings from history for navigation
+    // Extract command strings from history for navigation (persists after clear)
     pub fn get_history_commands(&self) -> Vec<String> {
-        self.entries
-            .iter()
-            .filter(|e| e.entry_type == EntryType::Command)
-            .filter_map(|e| e.content.first().cloned())
-            .collect()
+        self.command_history.clone()
     }
 
     // Get visible suggestion slice based on scroll offset
@@ -435,5 +488,35 @@ impl App {
     pub fn settings_reset_filter(&mut self) {
         self.settings_filter.clear();
         self.settings_filter_active = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_command_history_add_and_clear() {
+        let mut app = App::new();
+        assert!(app.command_history.is_empty());
+
+        app.add_command_history("ls");
+        app.add_command_history("cargo check");
+        // Consecutive duplicate should be ignored
+        app.add_command_history("cargo check");
+        assert_eq!(app.command_history, vec!["ls", "cargo check"]);
+
+        // Adding through add_entry
+        app.add_entry(Entry {
+            entry_type: EntryType::Command,
+            content: vec!["cargo test".to_string()],
+            cwd: "~".to_string(),
+        });
+        assert_eq!(app.get_history_commands(), vec!["ls", "cargo check", "cargo test"]);
+
+        // Calling clear() wipes entries but leaves command_history intact
+        app.clear();
+        assert!(app.entries.is_empty());
+        assert_eq!(app.get_history_commands(), vec!["ls", "cargo check", "cargo test"]);
     }
 }
