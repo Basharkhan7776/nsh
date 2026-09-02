@@ -28,8 +28,42 @@ struct RelatedTopic {
     first_url: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct SearxngResponse {
+    #[serde(default)]
+    results: Vec<SearxngItem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SearxngItem {
+    title: Option<String>,
+    url: Option<String>,
+    content: Option<String>,
+}
+
 pub async fn web_search(query: &str) -> Result<Vec<SearchResult>, ToolError> {
     let client = Client::new();
+
+    // 1) Try local SearXNG if available (localhost:8080 or custom SEARXNG_URL)
+    let searxng_base = std::env::var("SEARXNG_URL").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let searxng_url = format!("{}/search?q={}&format=json", searxng_base.trim_end_matches('/'), urlencoding::encode(query));
+    if let Ok(resp) = client.get(&searxng_url).timeout(std::time::Duration::from_millis(800)).send().await {
+        if let Ok(data) = resp.json::<SearxngResponse>().await {
+            if !data.results.is_empty() {
+                let mut results = Vec::new();
+                for item in data.results.into_iter().take(5) {
+                    results.push(SearchResult {
+                        title: item.title.unwrap_or_else(|| query.to_string()),
+                        url: item.url.unwrap_or_default(),
+                        snippet: item.content.unwrap_or_default(),
+                    });
+                }
+                return Ok(results);
+            }
+        }
+    }
+
+    // 2) Fallback to DuckDuckGo Instant Answer API
     let url = format!(
         "https://api.duckduckgo.com/?q={}&format=json&no_html=1&skip_disambig=1",
         urlencoding::encode(query)

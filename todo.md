@@ -1,1 +1,2 @@
 - AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible
+- What ever process is running from ai would reflect in tui like do, build and plan have

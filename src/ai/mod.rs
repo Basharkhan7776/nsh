@@ -188,9 +188,12 @@ impl AiProvider {
 
         let user_message = messages.join("\n");
 
-        let response = LanguageModelRequest::builder()
+        let mut builder = LanguageModelRequest::builder()
             .model(self.provider.clone())
-            .prompt(user_message)
+            .prompt(user_message);
+        builder.max_output_tokens = Some(8192);
+
+        let response = builder
             .build()
             .generate_text()
             .await
