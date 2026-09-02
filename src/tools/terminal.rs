@@ -195,6 +195,67 @@ pub fn mkdir(path: &str) -> Result<(), TerminalError> {
     Ok(())
 }
 
+pub fn cd(path: Option<&str>) -> Result<String, TerminalError> {
+    let target = match path {
+        Some(p) if !p.trim().is_empty() && p.trim() != "~" => {
+            let p_trimmed = p.trim();
+            if let Some(rest) = p_trimmed.strip_prefix("~/") {
+                if let Ok(home) = std::env::var("HOME") {
+                    format!("{}/{}", home, rest)
+                } else {
+                    p_trimmed.to_string()
+                }
+            } else {
+                p_trimmed.to_string()
+            }
+        }
+        _ => std::env::var("HOME").unwrap_or_else(|_| String::from("/")),
+    };
+
+    let p = Path::new(&target);
+    if !p.exists() {
+        return Err(TerminalError::NotFound(target));
+    }
+    std::env::set_current_dir(p)?;
+    let new_cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or(target);
+    Ok(new_cwd)
+}
+
+pub fn touch(path: &str) -> Result<(), TerminalError> {
+    let p = Path::new(path);
+    if let Some(parent) = p.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    if !p.exists() {
+        std::fs::File::create(p)?;
+    } else {
+        let file = std::fs::OpenOptions::new().write(true).open(p)?;
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+    Ok(())
+}
+
+pub fn exec_cmd(cmd: &str) -> Result<String, TerminalError> {
+    let output = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() {
+        stderr
+    } else {
+        format!("{}\n{}", stdout.trim_end(), stderr.trim_end())
+    };
+    Ok(combined)
+}
+
 fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), TerminalError> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
@@ -208,4 +269,53 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), TerminalError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub static TEST_CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_touch_creates_file() {
+        let test_file = "test_touch_file.tmp";
+        if Path::new(test_file).exists() {
+            let _ = std::fs::remove_file(test_file);
+        }
+
+        assert!(touch(test_file).is_ok());
+        assert!(Path::new(test_file).exists());
+
+        // Second touch updates timestamp without error
+        assert!(touch(test_file).is_ok());
+
+        let _ = std::fs::remove_file(test_file);
+    }
+
+    #[test]
+    fn test_cd_and_ls() {
+        let _guard = TEST_CWD_LOCK.lock().unwrap();
+        let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
+        std::env::set_current_dir(&manifest_dir).unwrap();
+        let orig_cwd = std::env::current_dir().unwrap();
+
+        // cd into src
+        let new_cwd = cd(Some("src")).expect("cd src should succeed");
+        assert!(new_cwd.ends_with("src"));
+
+        // ls should list files in src
+        let files = ls(None).expect("ls in src should succeed");
+        assert!(files.iter().any(|f| f.name == "main.rs" || f.name == "lib.rs"));
+
+        // Restore original cwd
+        std::env::set_current_dir(orig_cwd).unwrap();
+    }
+
+    #[test]
+    fn test_exec_cmd() {
+        let out = exec_cmd("echo 'hello nsh'").expect("exec_cmd should succeed");
+        assert_eq!(out.trim(), "hello nsh");
+    }
 }

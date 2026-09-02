@@ -17,7 +17,7 @@ pub use modules::config::{
     SUGGESTION_SELECTED_BG, SUGGESTION_SELECTED_FG, SYSTEM_FG, VISIBLE_HISTORY_LINES,
 };
 pub use modules::keybindings;
-pub use modules::render::render;
+pub use modules::render::{compute_settings_modal_area, render};
 pub use modules::state::{App, Entry, EntryType};
 pub use rag::{Document, RagEngine, RagError};
 pub use storage::{LocalStorage, NshConfig, StorageError, VectorError, VectorStore};

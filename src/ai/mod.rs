@@ -118,6 +118,7 @@ fn default_gemini_models() -> Vec<String> {
 fn default_openrouter_models() -> Vec<String> {
     vec![
         "openrouter/auto".to_string(),
+        "stealth/ox-alpha".to_string(),
         "anthropic/claude-sonnet-4".to_string(),
         "anthropic/claude-opus-4".to_string(),
         "openai/gpt-4.1".to_string(),

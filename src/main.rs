@@ -331,11 +331,11 @@ fn main() -> std::io::Result<()> {
                                                                     content: output_lines,
                                                                     cwd: String::new(),
                                                                 });
-                                                            } else {
+                                                            } else if ai_cmd != AiCommand::Do {
                                                                 app.add_entry(Entry {
                                                                     entry_type: EntryType::System,
                                                                     content: vec![format!(
-                                                                        "✓ {} finished (empty response)",
+                                                                        "[OK] {} finished (empty response)",
                                                                         verb
                                                                     )],
                                                                     cwd: String::new(),
@@ -413,11 +413,7 @@ fn main() -> std::io::Result<()> {
                                             if let Some(s) =
                                                 app.current_suggestions.get(app.selected_suggestion)
                                             {
-                                                if app.current_input.starts_with("cd ") {
-                                                    app.current_input = format!("cd {}", s.0);
-                                                } else {
-                                                    app.current_input = s.1.clone();
-                                                }
+                                                app.current_input = s.0.clone();
                                                 app.cursor_position = app.current_input.len();
                                             }
                                             app.show_suggestions = false;
@@ -425,15 +421,8 @@ fn main() -> std::io::Result<()> {
                                         } else if !app.current_input.is_empty() {
                                             app.update_suggestions();
                                             if app.current_suggestions.len() == 1 {
-                                                if app.current_input.starts_with("cd ") {
-                                                    app.current_input = format!(
-                                                        "cd {}",
-                                                        app.current_suggestions[0].0
-                                                    );
-                                                } else {
-                                                    app.current_input =
-                                                        app.current_suggestions[0].1.clone();
-                                                }
+                                                app.current_input =
+                                                    app.current_suggestions[0].0.clone();
                                                 app.cursor_position = app.current_input.len();
                                                 app.show_suggestions = false;
                                                 app.current_suggestions.clear();
@@ -573,26 +562,106 @@ fn main() -> std::io::Result<()> {
 
                             // Mouse input handling
                             Event::Mouse(mouse) => {
-                                // Settings mode: left click selects item
+                                // Settings mode: left click inside or outside modal
                                 if app.show_settings
                                     && mouse.kind == MouseEventKind::Down(MouseButton::Left)
                                 {
-                                    let page = app.current_settings_page();
-                                    let y_offset: u16 = match page {
-                                        SettingsPage::Home
-                                        | SettingsPage::Provider
-                                        | SettingsPage::Model => 2,
-                                        SettingsPage::Enable => 4,
-                                        _ => 0,
-                                    };
-                                    if y_offset > 0
-                                        && let Some(row) = mouse.row.checked_sub(y_offset)
+                                    let screen_size = terminal.size().unwrap_or_default();
+                                    let screen_area = ratatui::layout::Rect::new(0, 0, screen_size.width, screen_size.height);
+                                    let modal = nsh::compute_settings_modal_area(screen_area);
+
+                                    // Click outside modal closes settings
+                                    if mouse.column < modal.x
+                                        || mouse.column >= modal.x + modal.width
+                                        || mouse.row < modal.y
+                                        || mouse.row >= modal.y + modal.height
                                     {
-                                        let idx = row as usize;
-                                        let count = app.settings_page_item_count();
-                                        if count > 0 && idx < count {
-                                            app.settings_cursor = idx;
-                                            settings_handle_enter(&mut app);
+                                        app.show_settings = false;
+                                        app.settings_reset_filter();
+                                    } else if mouse.row == modal.y
+                                        && mouse.column >= modal.x + modal.width.saturating_sub(10)
+                                    {
+                                        // Click on [Esc X] close button
+                                        app.settings_pop();
+                                        if app.settings_nav.is_empty() {
+                                            app.show_settings = false;
+                                            app.settings_reset_filter();
+                                        }
+                                    } else {
+                                        let inner_y = modal.y + 1;
+                                        let page = app.current_settings_page();
+                                        match page {
+                                            SettingsPage::Home => {
+                                                if mouse.row == inner_y {
+                                                    // Search bar clicked
+                                                    app.settings_filter_active = true;
+                                                } else {
+                                                    let rel = mouse.row.saturating_sub(inner_y);
+                                                    match rel {
+                                                        3 => {
+                                                            app.settings_cursor = 0;
+                                                            settings_handle_enter(&mut app);
+                                                        }
+                                                        4 => {
+                                                            app.settings_cursor = 1;
+                                                            settings_handle_enter(&mut app);
+                                                        }
+                                                        6 => {
+                                                            app.settings_cursor = 2;
+                                                            settings_handle_enter(&mut app);
+                                                        }
+                                                        7 => {
+                                                            app.settings_cursor = 3;
+                                                            settings_handle_enter(&mut app);
+                                                        }
+                                                        9 => {
+                                                            app.settings_state.enabled = !app.settings_state.enabled;
+                                                        }
+                                                        r if r >= modal.height.saturating_sub(3) => {
+                                                            let mid_x = modal.x + modal.width / 2;
+                                                            if mouse.column < mid_x {
+                                                                app.settings_cursor = 5;
+                                                                settings_handle_enter(&mut app);
+                                                            } else {
+                                                                app.settings_cursor = 6;
+                                                                settings_handle_enter(&mut app);
+                                                            }
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            }
+                                            SettingsPage::Provider => {
+                                                let start_y = inner_y + 3;
+                                                if mouse.row >= start_y {
+                                                    let idx = ((mouse.row - start_y) / 2) as usize;
+                                                    if idx < ProviderType::count() {
+                                                        app.settings_cursor = idx;
+                                                        settings_handle_enter(&mut app);
+                                                    }
+                                                }
+                                            }
+                                            SettingsPage::Model => {
+                                                let start_y = inner_y + 3;
+                                                if mouse.row >= start_y {
+                                                    let idx = (mouse.row - start_y) as usize;
+                                                    if idx < app.settings_state.available_models.len() {
+                                                        app.settings_cursor = idx;
+                                                        settings_handle_enter(&mut app);
+                                                    }
+                                                }
+                                            }
+                                            SettingsPage::Enable => {
+                                                let start_y = inner_y + 4;
+                                                if mouse.row >= start_y {
+                                                    let idx = ((mouse.row - start_y) / 2) as usize;
+                                                    if idx < 2 {
+                                                        app.settings_cursor = idx;
+                                                        settings_handle_enter(&mut app);
+                                                    }
+                                                }
+                                            }
+                                            _ => {}
                                         }
                                     }
                                 }
@@ -684,9 +753,15 @@ fn handle_settings_input(
     let page = app.current_settings_page();
     let ctrl = modifiers.contains(KeyModifiers::CONTROL);
 
+    // Ctrl+S: Save and close immediately from anywhere in settings
+    if ctrl && matches!(key_code, KeyCode::Char('s') | KeyCode::Char('S')) {
+        save_settings_state(&app.settings_state);
+        app.show_settings = false;
+        app.settings_reset_filter();
+        return;
+    }
+
     // Clipboard paste via Ctrl+V / Ctrl+Shift+V (arboard).
-    // Note: many terminals deliver Ctrl+Shift+V as Event::Paste instead (handled
-    // in the main loop via EnableBracketedPaste).
     if ctrl && matches!(key_code, KeyCode::Char('v') | KeyCode::Char('V')) {
         if let Some(text) = nsh::keybindings::paste_from_clipboard() {
             settings_apply_paste(app, &text);
@@ -694,14 +769,37 @@ fn handle_settings_input(
         return;
     }
 
-    // Ctrl+U clears the current editable field.
+    // Ctrl+U clears the current editable field or search filter.
     if ctrl && matches!(key_code, KeyCode::Char('u') | KeyCode::Char('U')) {
-        match page {
-            BaseUrl => app.settings_state.base_url.clear(),
-            ApiKey => {
-                app.settings_state.api_key.clear();
-                app.settings_state.api_key_original.clear();
+        if app.settings_filter_active {
+            app.settings_filter.clear();
+        } else {
+            match page {
+                BaseUrl => app.settings_state.base_url.clear(),
+                ApiKey => {
+                    app.settings_state.api_key.clear();
+                    app.settings_state.api_key_original.clear();
+                }
+                _ => {}
             }
+        }
+        return;
+    }
+
+    // Active filter mode handling on Home:
+    if page == Home && app.settings_filter_active {
+        match key_code {
+            KeyCode::Esc | KeyCode::Enter => {
+                app.settings_filter_active = false;
+            }
+            KeyCode::Backspace => {
+                app.settings_filter.pop();
+            }
+            KeyCode::Char(c) if !ctrl => {
+                app.settings_filter.push(c);
+            }
+            KeyCode::Up => app.settings_move_up(),
+            KeyCode::Down => app.settings_move_down(),
             _ => {}
         }
         return;
@@ -709,9 +807,29 @@ fn handle_settings_input(
 
     match key_code {
         KeyCode::Esc => {
-            app.settings_pop();
-            if app.settings_nav.is_empty() {
-                app.show_settings = false;
+            if !app.settings_filter.is_empty() {
+                app.settings_reset_filter();
+            } else {
+                app.settings_pop();
+                if app.settings_nav.is_empty() {
+                    app.show_settings = false;
+                    app.settings_reset_filter();
+                }
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') if page != BaseUrl && page != ApiKey => {
+            app.settings_move_up();
+        }
+        KeyCode::Down | KeyCode::Char('j') if page != BaseUrl && page != ApiKey => {
+            app.settings_move_down();
+        }
+        KeyCode::Char('/') if page == Home && !ctrl => {
+            app.settings_filter_active = true;
+        }
+        KeyCode::Char(' ') if page == Home && !ctrl => {
+            // Space toggles Enable AI on Home
+            if app.settings_cursor == 4 {
+                app.settings_state.enabled = !app.settings_state.enabled;
             }
         }
         KeyCode::Up => app.settings_move_up(),

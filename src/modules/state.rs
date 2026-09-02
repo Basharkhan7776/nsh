@@ -145,6 +145,8 @@ pub struct App {
     pub settings_cursor: usize,                     // Settings field cursor (Home page index)
     pub settings_input: String,                     // Input buffer for editing fields
     pub settings_nav: Vec<SettingsPage>,            // Navigation stack
+    pub settings_filter: String,                    // Search filter for settings
+    pub settings_filter_active: bool,               // Whether filter input is active
     pub ai_loading: Option<AiLoadingState>,         // Active AI request spinner
 }
 
@@ -169,6 +171,8 @@ impl App {
             settings_cursor: 0,
             settings_input: String::new(),
             settings_nav: Vec::new(),
+            settings_filter: String::new(),
+            settings_filter_active: false,
             ai_loading: None,
         }
     }
@@ -426,5 +430,10 @@ impl App {
         if max > 0 && self.settings_cursor + 1 < max {
             self.settings_cursor += 1;
         }
+    }
+
+    pub fn settings_reset_filter(&mut self) {
+        self.settings_filter.clear();
+        self.settings_filter_active = false;
     }
 }
