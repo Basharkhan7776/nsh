@@ -8,7 +8,7 @@ pub mod rag;
 
 // Re-export public types and functions
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
-pub use ai::agent::{run_ai_command, AiCommand};
+pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
 pub use modules::commands::{
     command_needs_sudo_password, execute_command, parse_command_line, prompt_gui_password,
     shorten_cwd, validate_and_cache_sudo_password,

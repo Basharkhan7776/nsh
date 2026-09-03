@@ -106,6 +106,9 @@ pub struct AiLoadingState {
     pub provider: String, // "gemini"
     pub model: String,    // "gemini-3.5-flash"
     pub frame: usize,     // spinner frame index
+    pub current_step: usize,
+    pub max_steps: usize,
+    pub current_action: String,
 }
 
 impl AiLoadingState {
@@ -117,12 +120,19 @@ impl AiLoadingState {
     }
 
     pub fn status_line(&self) -> String {
+        let action_str = if !self.current_action.is_empty() {
+            format!(" | {}", self.current_action)
+        } else if self.max_steps > 0 {
+            format!(" [Step {}/{}]", self.current_step.max(1), self.max_steps)
+        } else {
+            String::new()
+        };
         format!(
-            "{} {} ({} / {}) — please wait…",
+            "{} {} ({}){} — [Esc to stop]",
             self.spinner_glyph(),
             self.verb,
-            self.provider,
-            self.model
+            self.model,
+            action_str,
         )
     }
 }
@@ -264,7 +274,7 @@ impl App {
 
     // Add entry to history and update derived state
     pub fn add_entry(&mut self, entry: Entry) {
-        if entry.entry_type == EntryType::Command {
+        if entry.entry_type == EntryType::Command && !entry.cwd.is_empty() {
             if let Some(first) = entry.content.first() {
                 self.add_command_history(first);
             }

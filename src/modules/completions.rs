@@ -570,6 +570,104 @@ pub fn complete_paths(
     results
 }
 
+/// Complete files and folders for `@` references across the repository / directory tree.
+/// Supports both explicit path prefixing (`@src/ai/`) and multi-folder recursive search (`@agent` -> `@src/ai/agent.rs`).
+pub fn complete_at_references(token: &str) -> Vec<(String, String)> {
+    let mut results = Vec::new();
+    let query = token.strip_prefix('@').unwrap_or(token);
+    let (base_dir, prefix) = parse_dir_path(query);
+
+    // 1. Direct path completion in the specified directory (e.g. @src/ or @src/ai/)
+    let direct_paths = complete_paths(&base_dir, &prefix, false);
+    for (completed_path, display) in direct_paths {
+        let completed_at = format!("@{}", completed_path);
+        let display_at = format!("@{}{}", base_dir, display);
+        results.push((completed_at, display_at));
+    }
+
+    // 2. Multi-folder / recursive search:
+    // If user typed a search term (e.g. "@agent", "@render", "@mod", "@main", "@comp"),
+    // also search across all project subdirectories (depth 4) so they can find files in multiple folders.
+    let prefix_lower = prefix.to_lowercase();
+    if !prefix_lower.is_empty() && !query.starts_with('/') && !query.starts_with('~') {
+        let mut recursive_matches = Vec::new();
+
+        fn walk_for_matches(
+            dir: &std::path::Path,
+            root: &std::path::Path,
+            query_lower: &str,
+            depth: usize,
+            results: &mut Vec<(String, String)>,
+        ) {
+            if depth > 4 || results.len() >= 35 {
+                return;
+            }
+            let rd = match std::fs::read_dir(dir) {
+                Ok(r) => r,
+                Err(_) => return,
+            };
+            let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+            entries.sort_by_key(|e| e.file_name());
+
+            for entry in entries {
+                if results.len() >= 35 {
+                    break;
+                }
+                let file_name = entry.file_name().to_string_lossy().to_string();
+                if file_name.starts_with('.') || file_name == "target" || file_name == "node_modules" {
+                    continue;
+                }
+                let path = entry.path();
+                let rel = path
+                    .strip_prefix(root)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .to_string();
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+
+                // Match against filename or relative path
+                if file_name.to_lowercase().contains(query_lower)
+                    || rel.to_lowercase().contains(query_lower)
+                {
+                    if is_dir {
+                        let completed = format!("@{}/", rel);
+                        let display = format!("@{}/", rel);
+                        results.push((completed, display));
+                    } else {
+                        let completed = format!("@{} ", rel);
+                        let display = format!("@{}", rel);
+                        results.push((completed, display));
+                    }
+                }
+
+                if is_dir {
+                    walk_for_matches(&path, root, query_lower, depth + 1, results);
+                }
+            }
+        }
+
+        walk_for_matches(
+            std::path::Path::new("."),
+            std::path::Path::new("."),
+            &prefix_lower,
+            0,
+            &mut recursive_matches,
+        );
+
+        for item in recursive_matches {
+            if !results.iter().any(|r| r.0 == item.0) {
+                results.push(item);
+            }
+        }
+    }
+
+    if results.len() > 35 {
+        results.truncate(35);
+    }
+
+    results
+}
+
 /// Find local git branches if inside a git repository.
 pub fn get_git_branches(prefix: &str) -> Vec<(String, String)> {
     let mut branches = Vec::new();
@@ -657,12 +755,8 @@ pub fn update_suggestions(app: &mut App) {
         let token_lower = parsed.current_token.to_lowercase();
 
         if parsed.current_token.starts_with('@') {
-            let path_part = &parsed.current_token[1..];
-            let (base_dir, prefix) = parse_dir_path(path_part);
-            let paths = complete_paths(&base_dir, &prefix, false);
-            for (completed_path, display) in paths {
-                let completed_at = format!("@{}", completed_path);
-                let display_at = format!("@{}{}", base_dir, display);
+            let at_completions = complete_at_references(parsed.current_token);
+            for (completed_at, display_at) in at_completions {
                 let full = format!("{}{}{}", parsed.line_prefix, completed_at, parsed.line_suffix);
                 suggestions.push((full, display_at));
             }
@@ -712,14 +806,9 @@ pub fn update_suggestions(app: &mut App) {
         let is_cd = matches!(cmd, "cd" | "rmdir" | "pushd");
 
         if token.starts_with('@') {
-            // Suggest files and directories with @ prefix for AI prompt reference
-            let path_part = &token[1..];
-            let (base_dir, prefix) = parse_dir_path(path_part);
-            let paths = complete_paths(&base_dir, &prefix, false);
-
-            for (completed_path, display) in paths {
-                let completed_at = format!("@{}", completed_path);
-                let display_at = format!("@{}{}", base_dir, display);
+            // Suggest files and directories with @ prefix for AI prompt reference (multi-folder recursive search)
+            let at_completions = complete_at_references(token);
+            for (completed_at, display_at) in at_completions {
                 let full = format!("{}{}{}", parsed.line_prefix, completed_at, parsed.line_suffix);
                 suggestions.push((full, display_at));
             }
@@ -1089,6 +1178,25 @@ mod tests {
                 .iter()
                 .any(|(full, _)| full.contains("@Cargo.toml")),
             "Suggestions should include @Cargo.toml"
+        );
+    }
+
+    #[test]
+    fn test_complete_at_references_recursive_multi_folder() {
+        // Typing @agent should find @src/ai/agent.rs across nested folders
+        let matches = complete_at_references("@agent");
+        assert!(
+            matches.iter().any(|(completed, display)| {
+                completed.contains("agent.rs") && display.contains("agent.rs")
+            }),
+            "Recursive multi-folder @ search should find agent.rs"
+        );
+
+        // Typing @src/ should find direct files and folders inside src/
+        let src_matches = complete_at_references("@src/");
+        assert!(
+            src_matches.iter().any(|(completed, _)| completed.contains("ai/")),
+            "Should find ai/ directory in src/"
         );
     }
 }

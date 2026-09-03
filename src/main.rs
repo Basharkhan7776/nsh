@@ -14,7 +14,7 @@ use nsh::{
     SCROLL_STEP, Selection, SudoPromptMode,
     ai::{
         ProviderType,
-        agent::{AiCommand, run_ai_command},
+        agent::{AiCommand, run_ai_command, AgentUpdate},
     },
     extract_selected_text, fetch_models,
     keybindings::{Action, execute_action, get_action},
@@ -374,11 +374,14 @@ fn main() -> std::io::Result<()> {
                                                     provider: ai_cfg.provider.to_string(),
                                                     model: model.clone(),
                                                     frame: 0,
+                                                    current_step: 0,
+                                                    max_steps: ai_cmd.max_steps(),
+                                                    current_action: String::new(),
                                                 });
                                                 render(&mut terminal, &mut app)?;
 
-                                                // Run AI on a background thread so the UI can spin.
-                                                let (tx, rx) = mpsc::channel();
+                                                // Run AI on a background thread with real-time update channel.
+                                                let (update_tx, update_rx) = mpsc::channel();
                                                 let ai_cfg_bg = ai_cfg.clone();
                                                 let query_bg = query.clone();
                                                 let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -391,103 +394,152 @@ fn main() -> std::io::Result<()> {
                                                     let rt = match tokio::runtime::Runtime::new() {
                                                         Ok(rt) => rt,
                                                         Err(e) => {
-                                                            let _ = tx.send(Err(
-                                                                nsh::AiError::Request(format!(
-                                                                    "runtime: {e}"
-                                                                )),
-                                                            ));
+                                                            let _ = update_tx.send(AgentUpdate::Error(format!(
+                                                                "runtime: {e}"
+                                                            )));
                                                             return;
                                                         }
                                                     };
-                                                    let res = rt.block_on(run_ai_command(
-                                                         ai_cmd, &query_bg, ai_cfg_bg, &storage, Some(cancel_bg),
-                                                    ));
-                                                    let _ = tx.send(res);
+                                                    let _ = rt.block_on(run_ai_command(
+                                                         ai_cmd, &query_bg, ai_cfg_bg, &storage, Some(cancel_bg), Some(update_tx),
+                                                     ));
                                                 });
 
-                                                // Animate spinner until the AI task finishes.
+                                                // Process live agent events & animate spinner until done
                                                 loop {
                                                     if let Some(ref mut loading) = app.ai_loading {
-                                                        loading.frame =
-                                                            loading.frame.wrapping_add(1);
+                                                        loading.frame = loading.frame.wrapping_add(1);
                                                     }
-                                                    render(&mut terminal, &mut app)?;
 
-                                                    match rx.try_recv() {
-                                                        Ok(ai_out) => {
-                                                            app.ai_loading = None;
-                                                            let output_lines = match ai_out {
-                                                                Ok(lines) => lines,
-                                                                Err(e) => {
-                                                                    vec![format!("AI error: {}", e)]
+                                                    let mut task_completed = false;
+                                                    while let Ok(update) = update_rx.try_recv() {
+                                                        match update {
+                                                            AgentUpdate::Thinking { step, max_steps, thought } => {
+                                                                let clean_thought = thought.trim();
+                                                                if let Some(ref mut loading) = app.ai_loading {
+                                                                    loading.current_step = step + 1;
+                                                                    loading.max_steps = max_steps;
+                                                                    let short_thought = if clean_thought.len() > 40 {
+                                                                        format!("{}...", &clean_thought[..37])
+                                                                    } else {
+                                                                        clean_thought.to_string()
+                                                                    };
+                                                                    loading.current_action = format!("Thinking: {}", short_thought);
                                                                 }
-                                                            };
-                                                            if !output_lines.is_empty() {
+                                                                if !clean_thought.is_empty() {
+                                                                    app.add_entry(Entry {
+                                                                        entry_type: EntryType::System,
+                                                                        content: vec![format!("> Thinking (step {}/{}): {}", step + 1, max_steps, clean_thought)],
+                                                                        cwd: String::new(),
+                                                                    });
+                                                                }
+                                                            }
+                                                            AgentUpdate::ToolStarted { step, tool, command_or_args } => {
+                                                                if let Some(ref mut loading) = app.ai_loading {
+                                                                    loading.current_step = step + 1;
+                                                                    let short_cmd = if command_or_args.len() > 35 {
+                                                                        format!("{}...", &command_or_args[..32])
+                                                                    } else {
+                                                                        command_or_args.clone()
+                                                                    };
+                                                                    loading.current_action = format!("Running {} {}", tool, short_cmd);
+                                                                }
                                                                 app.add_entry(Entry {
-                                                                    entry_type: EntryType::Output,
-                                                                    content: output_lines,
-                                                                    cwd: String::new(),
-                                                                });
-                                                            } else if ai_cmd != AiCommand::Do {
-                                                                app.add_entry(Entry {
-                                                                    entry_type: EntryType::System,
-                                                                    content: vec![format!(
-                                                                        "[OK] {} finished (empty response)",
-                                                                        verb
-                                                                    )],
+                                                                    entry_type: EntryType::Command,
+                                                                    content: vec![format!("$ [tool: {}] {}", tool, command_or_args)],
                                                                     cwd: String::new(),
                                                                 });
                                                             }
-                                                            break;
-                                                        }
-                                                        Err(mpsc::TryRecvError::Empty) => {
-                                                            let mut user_cancelled = false;
-                                                            while event::poll(
-                                                                std::time::Duration::from_millis(0),
-                                                            )
-                                                            .unwrap_or(false)
-                                                            {
-                                                                if let Ok(Event::Key(key)) = event::read() {
-                                                                    if key.code == KeyCode::Esc
-                                                                        || (key.code == KeyCode::Char('c')
-                                                                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                                                            AgentUpdate::ToolOutput { tool: _, lines } => {
+                                                                if !lines.is_empty() {
+                                                                    let display_lines = if lines.len() > 25 {
+                                                                        let mut truncated = lines[..20].to_vec();
+                                                                        truncated.push(format!("... ({} more lines)", lines.len() - 20));
+                                                                        truncated
+                                                                    } else {
+                                                                        lines
+                                                                    };
+                                                                    app.add_entry(Entry {
+                                                                        entry_type: EntryType::Output,
+                                                                        content: display_lines,
+                                                                        cwd: String::new(),
+                                                                    });
+                                                                }
+                                                            }
+                                                            AgentUpdate::ToolFinished { tool: _, summary } => {
+                                                                if !summary.is_empty() {
+                                                                    app.add_entry(Entry {
+                                                                        entry_type: EntryType::Output,
+                                                                        content: vec![summary],
+                                                                        cwd: String::new(),
+                                                                    });
+                                                                }
+                                                            }
+                                                            AgentUpdate::Completed { final_answer, tool_output_lines: _ } => {
+                                                                app.ai_loading = None;
+                                                                if let Some(ans) = final_answer {
+                                                                    let clean = ans.trim();
+                                                                    let lower = clean.to_lowercase();
+                                                                    if !clean.is_empty()
+                                                                        && lower != "done"
+                                                                        && lower != "done."
+                                                                        && !lower.starts_with("done")
+                                                                        && !clean.starts_with("TOOL:")
                                                                     {
-                                                                        user_cancelled = true;
-                                                                        break;
+                                                                        app.add_entry(Entry {
+                                                                            entry_type: EntryType::Output,
+                                                                            content: clean.lines().map(|s| s.to_string()).collect(),
+                                                                            cwd: String::new(),
+                                                                        });
                                                                     }
                                                                 }
+                                                                task_completed = true;
+                                                                break;
                                                             }
-
-                                                            if user_cancelled {
-                                                                cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                            AgentUpdate::Error(err_msg) => {
                                                                 app.ai_loading = None;
                                                                 app.add_entry(Entry {
                                                                     entry_type: EntryType::System,
-                                                                    content: vec!["^C [Process stopped by Esc]".to_string()],
+                                                                    content: vec![format!("AI error: {}", err_msg)],
                                                                     cwd: String::new(),
                                                                 });
+                                                                task_completed = true;
                                                                 break;
                                                             }
-
-                                                            std::thread::sleep(
-                                                                std::time::Duration::from_millis(
-                                                                    60,
-                                                                ),
-                                                            );
-                                                        }
-                                                        Err(mpsc::TryRecvError::Disconnected) => {
-                                                            app.ai_loading = None;
-                                                            app.add_entry(Entry {
-                                                                entry_type: EntryType::System,
-                                                                content: vec![
-                                                                    "AI task ended unexpectedly"
-                                                                        .to_string(),
-                                                                ],
-                                                                cwd: String::new(),
-                                                            });
-                                                            break;
                                                         }
                                                     }
+
+                                                    if task_completed {
+                                                        break;
+                                                    }
+
+                                                    render(&mut terminal, &mut app)?;
+
+                                                    let mut user_cancelled = false;
+                                                    while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+                                                        if let Ok(Event::Key(key)) = event::read() {
+                                                            if key.code == KeyCode::Esc
+                                                                || (key.code == KeyCode::Char('c')
+                                                                    && key.modifiers.contains(KeyModifiers::CONTROL))
+                                                            {
+                                                                user_cancelled = true;
+                                                                break;
+                                                            }
+                                                        }
+                                                    }
+
+                                                    if user_cancelled {
+                                                        cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                                                        app.ai_loading = None;
+                                                        app.add_entry(Entry {
+                                                            entry_type: EntryType::System,
+                                                            content: vec!["^C [Process stopped by Esc]".to_string()],
+                                                            cwd: String::new(),
+                                                        });
+                                                        break;
+                                                    }
+
+                                                    std::thread::sleep(std::time::Duration::from_millis(50));
                                                 }
                                             } else {
                                                 if nsh::command_needs_sudo_password(&input) {

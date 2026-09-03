@@ -26,7 +26,7 @@ impl AiCommand {
         }
     }
 
-    fn max_steps(&self) -> usize {
+    pub fn max_steps(&self) -> usize {
         match self {
             AiCommand::Ask => 1,
             AiCommand::Do => 10,
@@ -81,39 +81,172 @@ impl AiCommand {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum AgentUpdate {
+    Thinking {
+        step: usize,
+        max_steps: usize,
+        thought: String,
+    },
+    ToolStarted {
+        step: usize,
+        tool: String,
+        command_or_args: String,
+    },
+    ToolOutput {
+        tool: String,
+        lines: Vec<String>,
+    },
+    ToolFinished {
+        tool: String,
+        summary: String,
+    },
+    Completed {
+        final_answer: Option<String>,
+        tool_output_lines: Vec<String>,
+    },
+    Error(String),
+}
+
+/// Extract all @file or @folder tokens from query (including quoted e.g. @"foo/bar")
+fn extract_at_references(query: &str) -> Vec<String> {
+    let mut refs = Vec::new();
+    let chars: Vec<char> = query.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '@' {
+            i += 1;
+            if i >= chars.len() {
+                break;
+            }
+            if chars[i] == '"' || chars[i] == '\'' {
+                let quote = chars[i];
+                i += 1;
+                let start = i;
+                while i < chars.len() && chars[i] != quote {
+                    i += 1;
+                }
+                let path: String = chars[start..i].iter().collect();
+                if !path.trim().is_empty() {
+                    refs.push(path.trim().to_string());
+                }
+                if i < chars.len() {
+                    i += 1;
+                }
+            } else {
+                let start = i;
+                while i < chars.len()
+                    && !chars[i].is_whitespace()
+                    && chars[i] != ','
+                    && chars[i] != ';'
+                    && chars[i] != ')'
+                    && chars[i] != ']'
+                {
+                    i += 1;
+                }
+                let raw: String = chars[start..i].iter().collect();
+                let clean = raw.trim_matches(|c: char| {
+                    !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
+                });
+                if !clean.is_empty() {
+                    refs.push(clean.to_string());
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    refs
+}
+
+/// If a file does not exist directly at the root, search subdirectories for a matching file name
+fn find_file_in_subdirs(cwd: &std::path::Path, target_name: &str) -> Option<std::path::PathBuf> {
+    if target_name.contains('/') {
+        return None;
+    }
+    let mut found = None;
+    fn walk(
+        dir: &std::path::Path,
+        target: &str,
+        depth: usize,
+        found: &mut Option<std::path::PathBuf>,
+    ) {
+        if depth > 4 || found.is_some() {
+            return;
+        }
+        let rd = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        for entry in rd.flatten() {
+            if found.is_some() {
+                break;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with('.') || name == "target" || name == "node_modules" {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_file() && name == target {
+                *found = Some(path);
+                return;
+            } else if path.is_dir() {
+                walk(&path, target, depth + 1, found);
+            }
+        }
+    }
+    walk(cwd, target_name, 0, &mut found);
+    found
+}
+
 /// Resolve @filepath and @folder references in the user query against the working directory
 fn resolve_file_references(query: &str, cwd: &str) -> (String, Vec<String>) {
     let mut extra_context = Vec::new();
     let mut seen_paths = std::collections::HashSet::new();
+    let cwd_path = std::path::Path::new(cwd);
 
-    for word in query.split_whitespace() {
-        if let Some(target) = word.strip_prefix('@') {
-            let clean_path = target.trim_matches(|c: char| {
-                !c.is_alphanumeric() && c != '.' && c != '/' && c != '_' && c != '-'
-            });
-            if clean_path.is_empty() || !seen_paths.insert(clean_path.to_string()) {
-                continue;
+    let extracted = extract_at_references(query);
+    for target in extracted {
+        if !seen_paths.insert(target.clone()) {
+            continue;
+        }
+
+        let full = cwd_path.join(&target);
+        if full.is_file() {
+            if let Ok(content) = std::fs::read_to_string(&full) {
+                let snippet = if content.len() > 30_000 {
+                    format!("{}... [truncated]", &content[..30_000])
+                } else {
+                    content
+                };
+                extra_context.push(format!(
+                    "Referenced file @{}:\n```\n{}\n```",
+                    target, snippet
+                ));
             }
-
-            let full = std::path::Path::new(cwd).join(clean_path);
-            if full.is_file() {
-                if let Ok(content) = std::fs::read_to_string(&full) {
-                    let snippet = if content.len() > 30_000 {
-                        format!("{}... [truncated]", &content[..30_000])
-                    } else {
-                        content
-                    };
-                    extra_context.push(format!(
-                        "Referenced file @{}:\n```\n{}\n```",
-                        clean_path, snippet
-                    ));
-                }
-            } else if full.is_dir() {
-                let folder_ctx = format_folder_context(&full, clean_path);
-                extra_context.push(folder_ctx);
+        } else if full.is_dir() {
+            let folder_ctx = format_folder_context(&full, &target);
+            extra_context.push(folder_ctx);
+        } else if let Some(sub_path) = find_file_in_subdirs(cwd_path, &target) {
+            // Found in subdirectories (e.g. @agent.rs -> src/ai/agent.rs)
+            if let Ok(content) = std::fs::read_to_string(&sub_path) {
+                let rel = sub_path
+                    .strip_prefix(cwd_path)
+                    .unwrap_or(&sub_path)
+                    .to_string_lossy();
+                let snippet = if content.len() > 30_000 {
+                    format!("{}... [truncated]", &content[..30_000])
+                } else {
+                    content
+                };
+                extra_context.push(format!(
+                    "Referenced file @{} (located at {}):\n```\n{}\n```",
+                    target, rel, snippet
+                ));
             }
         }
     }
+
     (query.to_string(), extra_context)
 }
 
@@ -208,6 +341,117 @@ fn is_inspectable_file(name: &str) -> bool {
     )
 }
 
+fn extract_reasoning_thought(response: &str) -> Option<String> {
+    if let Some(start) = response.find("<think>") {
+        if let Some(end) = response[start + 7..].find("</think>") {
+            let thought = response[start + 7..start + 7 + end].trim();
+            if !thought.is_empty() {
+                return Some(thought.to_string());
+            }
+        }
+    }
+
+    let lower = response.to_lowercase();
+    let cut_pos = [
+        lower.find("tool:"),
+        lower.find("action:"),
+        lower.find("```json"),
+        lower.find("```"),
+        lower.find("{\"tool\""),
+        lower.find("{\"name\""),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+
+    if let Some(pos) = cut_pos {
+        let before = response[..pos].trim();
+        if !before.is_empty() && before.len() > 3 {
+            return Some(before.to_string());
+        }
+    }
+
+    None
+}
+
+fn format_tool_args_summary(tool_name: &str, args: &serde_json::Value) -> String {
+    match tool_name {
+        "grep" => {
+            let pat = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+            format!("pattern: \"{}\" in {}", pat, path)
+        }
+        "exec_cmd" | "run_command" | "exec" | "bash" | "sh" => {
+            args.get("cmd").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        }
+        "cat" => {
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        }
+        "ls" | "dir" => {
+            args.get("path").and_then(|v| v.as_str()).unwrap_or(".").to_string()
+        }
+        "write_file" | "write" => {
+            let path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
+            format!("{} ({} bytes)", path, len)
+        }
+        "mkdir" | "touch" | "delete_path" | "delete" | "rm" => {
+            args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        }
+        "copy_path" | "move_path" => {
+            let src = args.get("src").and_then(|v| v.as_str()).unwrap_or("");
+            let dst = args.get("dst").and_then(|v| v.as_str()).unwrap_or("");
+            format!("{} -> {}", src, dst)
+        }
+        "web_search" => {
+            args.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string()
+        }
+        _ => args.to_string(),
+    }
+}
+
+fn format_tool_summary(tool_name: &str, tool_res: &serde_json::Value, args_summary: &str) -> String {
+    if let Some(err) = tool_res.get("error").and_then(|v| v.as_str()) {
+        return format!("[{}] Error: {}", tool_name, err);
+    }
+    match tool_name {
+        "grep" => {
+            let count = tool_res.get("results").and_then(|v| v.as_str()).map(|s| s.lines().count()).unwrap_or(0);
+            format!("[grep] Found {} matching lines ({})", count, args_summary)
+        }
+        "write_file" | "write" => {
+            if let Some(path) = tool_res.get("path").and_then(|v| v.as_str()) {
+                let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+                format!("[write_file] Created {} ({} bytes)", path, size)
+            } else {
+                format!("[write_file] {}", args_summary)
+            }
+        }
+        "mkdir" => {
+            let p = tool_res.get("path").and_then(|v| v.as_str()).unwrap_or(args_summary);
+            format!("[mkdir] Created directory {}", p)
+        }
+        "touch" => {
+            let p = tool_res.get("path").and_then(|v| v.as_str()).unwrap_or(args_summary);
+            format!("[touch] Touched {}", p)
+        }
+        "delete_path" | "delete" | "rm" => {
+            let p = tool_res.get("path").and_then(|v| v.as_str()).unwrap_or(args_summary);
+            format!("[delete] Deleted {}", p)
+        }
+        "exec_cmd" | "run_command" | "exec" | "bash" | "sh" => {
+            format!("[exec_cmd] Finished: {}", args_summary)
+        }
+        "copy_path" => format!("[copy] {}", args_summary),
+        "move_path" => format!("[move] {}", args_summary),
+        "web_search" => {
+            let count = tool_res.as_array().map(|a| a.len()).unwrap_or(0);
+            format!("[web_search] Found {} results for \"{}\"", count, args_summary)
+        }
+        _ => String::new(),
+    }
+}
+
 /// Main entry for running an AI command. Returns lines to display as output.
 pub async fn run_ai_command(
     cmd: AiCommand,
@@ -215,6 +459,7 @@ pub async fn run_ai_command(
     ai_config: AiConfig,
     storage: &LocalStorage,
     cancel_token: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    update_tx: Option<std::sync::mpsc::Sender<AgentUpdate>>,
 ) -> Result<Vec<String>, AiError> {
     if !ai_config.enabled {
         return Err(AiError::NotEnabled);
@@ -266,11 +511,30 @@ pub async fn run_ai_command(
 
         let prompt = history.join("\n\n");
 
-        let response = provider.chat(vec![prompt]).await?;
+        let response = match provider.chat(vec![prompt]).await {
+            Ok(r) => r,
+            Err(e) => {
+                if let Some(ref tx) = update_tx {
+                    let _ = tx.send(AgentUpdate::Error(e.to_string()));
+                }
+                return Err(e);
+            }
+        };
 
         if let Some(ref cancel) = cancel_token {
             if cancel.load(std::sync::atomic::Ordering::Relaxed) {
                 return Ok(vec!["^C [Process stopped by Esc]".to_string()]);
+            }
+        }
+
+        // Check if there is reasoning/thought to stream to TUI
+        if let Some(thought) = extract_reasoning_thought(&response) {
+            if let Some(ref tx) = update_tx {
+                let _ = tx.send(AgentUpdate::Thinking {
+                    step: _step,
+                    max_steps,
+                    thought,
+                });
             }
         }
 
@@ -285,13 +549,39 @@ pub async fn run_ai_command(
                         return Ok(vec!["^C [Process stopped by Esc]".to_string()]);
                     }
                 }
+
+                let args_summary = format_tool_args_summary(&tool_name, &args_json);
+                if let Some(ref tx) = update_tx {
+                    let _ = tx.send(AgentUpdate::ToolStarted {
+                        step: _step,
+                        tool: tool_name.clone(),
+                        command_or_args: args_summary.clone(),
+                    });
+                }
+
                 let tool_res = execute_tool(&tool_name, args_json).await
                     .unwrap_or_else(|e| serde_json::json!({"error": e}));
 
                 tools_executed += 1;
-                if cmd == AiCommand::Do || cmd == AiCommand::Build {
-                    let lines = format_tool_output_for_terminal(&tool_name, &tool_res);
-                    tool_output_lines.extend(lines);
+                let lines = format_tool_output_for_terminal(&tool_name, &tool_res);
+                if (cmd == AiCommand::Do || cmd == AiCommand::Build) && !lines.is_empty() {
+                    tool_output_lines.extend(lines.clone());
+                }
+
+                let summary = format_tool_summary(&tool_name, &tool_res, &args_summary);
+                if let Some(ref tx) = update_tx {
+                    if !lines.is_empty() {
+                        let _ = tx.send(AgentUpdate::ToolOutput {
+                            tool: tool_name.clone(),
+                            lines,
+                        });
+                    }
+                    if !summary.is_empty() {
+                        let _ = tx.send(AgentUpdate::ToolFinished {
+                            tool: tool_name.clone(),
+                            summary,
+                        });
+                    }
                 }
 
                 let obs = format!("Observation (tool={}): {}", tool_name, tool_res);
@@ -307,8 +597,9 @@ pub async fn run_ai_command(
         }
     }
 
+    let mut result = Vec::new();
     if (cmd == AiCommand::Do || cmd == AiCommand::Build) && tools_executed > 0 {
-        let mut result = tool_output_lines;
+        result.extend(tool_output_lines.clone());
         if let Some(ref ans) = final_answer {
             let clean = ans.trim();
             let lower = clean.to_lowercase();
@@ -324,17 +615,18 @@ pub async fn run_ai_command(
                 result.extend(clean.lines().map(|s| s.to_string()));
             }
         }
-        if !result.is_empty() {
-            return Ok(result);
-        }
+    } else if let Some(ref ans) = final_answer {
+        result.extend(ans.lines().map(|s| s.to_string()));
     }
 
-    let answer = final_answer.unwrap_or_else(|| {
-        "The agent finished without a clear final message. (See history above if shown.)".to_string()
-    });
+    if let Some(ref tx) = update_tx {
+        let _ = tx.send(AgentUpdate::Completed {
+            final_answer: final_answer.clone(),
+            tool_output_lines: tool_output_lines.clone(),
+        });
+    }
 
-    // Return as display lines (split)
-    Ok(answer.lines().map(|s| s.to_string()).collect())
+    Ok(result)
 }
 
 fn format_tool_output_for_terminal(tool_name: &str, tool_res: &serde_json::Value) -> Vec<String> {
@@ -750,6 +1042,59 @@ mod tests {
         assert!(extra[0].contains("hello.rs"));
         let _ = std::fs::remove_dir_all(temp);
     }
+
+    #[test]
+    fn test_resolve_file_references_nested_fallback() {
+        let temp = std::env::temp_dir().join(format!("nsh_test_nested_{}", std::process::id()));
+        let nested_dir = temp.join("sub").join("nested");
+        let _ = std::fs::create_dir_all(&nested_dir);
+        let target_file = nested_dir.join("deep_code.rs");
+        let _ = std::fs::write(&target_file, "pub fn deep() -> bool { true }");
+
+        // Query mentions @deep_code.rs without full path
+        let query = "look at @deep_code.rs please";
+        let (_q, extra) = resolve_file_references(query, temp.to_str().unwrap());
+        assert_eq!(extra.len(), 1);
+        assert!(extra[0].contains("pub fn deep() -> bool { true }"));
+        assert!(extra[0].contains("deep_code.rs"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn test_resolve_file_references_quoted() {
+        let temp = std::env::temp_dir().join(format!("nsh_test_quoted_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&temp);
+        let file_path = temp.join("my spaced file.txt");
+        let _ = std::fs::write(&file_path, "spaced content");
+
+        let query = "check @\"my spaced file.txt\" here";
+        let (_q, extra) = resolve_file_references(query, temp.to_str().unwrap());
+        assert_eq!(extra.len(), 1);
+        assert!(extra[0].contains("spaced content"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn test_resolve_multiple_folders() {
+        let temp = std::env::temp_dir().join(format!("nsh_test_multi_{}", std::process::id()));
+        let dir1 = temp.join("folder_a");
+        let dir2 = temp.join("folder_b");
+        let _ = std::fs::create_dir_all(&dir1);
+        let _ = std::fs::create_dir_all(&dir2);
+        let _ = std::fs::write(dir1.join("a.rs"), "// file a");
+        let _ = std::fs::write(dir2.join("b.rs"), "// file b");
+
+        let query = "build feature based on @folder_a and @folder_b";
+        let (_q, extra) = resolve_file_references(query, temp.to_str().unwrap());
+        assert_eq!(extra.len(), 2);
+        assert!(extra.iter().any(|s| s.contains("folder_a") && s.contains("a.rs")));
+        assert!(extra.iter().any(|s| s.contains("folder_b") && s.contains("b.rs")));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
 }
+
 
 
