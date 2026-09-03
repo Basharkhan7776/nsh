@@ -10,8 +10,9 @@ pub mod rag;
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
 pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
 pub use modules::commands::{
-    command_needs_sudo_password, execute_command, parse_command_line, prompt_gui_password,
-    shorten_cwd, validate_and_cache_sudo_password,
+    command_needs_sudo_password, execute_command, execute_interactive_command,
+    is_interactive_command, parse_command_line, prompt_gui_password, shorten_cwd,
+    validate_and_cache_sudo_password,
 };
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{

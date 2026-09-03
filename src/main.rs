@@ -82,6 +82,72 @@ fn save_settings_state(state: &nsh::modules::state::SettingsState) {
     let _ = storage.save_config(&config);
 }
 
+fn run_command_in_terminal_or_capture(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    cmd_str: &str,
+) -> std::io::Result<()> {
+    if nsh::is_interactive_command(cmd_str) {
+        // Suspend TUI completely for interactive programs (nvim, nano, vim, htop, etc.)
+        let _ = execute!(
+            terminal.backend_mut(),
+            DisableMouseCapture,
+            DisableBracketedPaste,
+            LeaveAlternateScreen
+        );
+        let _ = disable_raw_mode();
+        let _ = terminal.show_cursor();
+
+        // Run interactive program directly with inherited stdio
+        let res = nsh::execute_interactive_command(cmd_str);
+
+        // Resume TUI completely
+        let _ = enable_raw_mode();
+        let _ = execute!(
+            terminal.backend_mut(),
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        );
+        let _ = terminal.clear();
+
+        if let Err(err_msg) = res {
+            app.add_entry(Entry {
+                entry_type: EntryType::Output,
+                content: vec![err_msg],
+                cwd: String::new(),
+            });
+        }
+        return Ok(());
+    }
+
+    // Non-interactive command: execute and capture output into TUI
+    let output = nsh::execute_command(cmd_str);
+    if output.iter().any(|s| s == "__SETTINGS__") {
+        app.settings_state = load_settings_state();
+        app.show_settings = true;
+        app.settings_cursor = 0;
+        app.settings_input.clear();
+        app.settings_nav.clear();
+
+        let base_url = app.settings_state.base_url.clone();
+        let provider = app.settings_state.provider;
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        app.settings_state.available_models = rt.block_on(fetch_models(provider, &base_url));
+    } else if output.iter().any(|s| s == "__CLEAR__") {
+        app.clear();
+        terminal.clear()?;
+    } else if !output.is_empty() {
+        app.add_entry(Entry {
+            entry_type: EntryType::Output,
+            content: output,
+            cwd: String::new(),
+        });
+    }
+
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     // Initialize terminal for alternate screen buffer with bracketed paste and mouse capture.
     // Mouse capture allows smooth mouse scrolling, click-to-focus on output, and drag text selection.
@@ -190,17 +256,7 @@ fn main() -> std::io::Result<()> {
                                                     let cmd = app.pending_sudo_command.take().unwrap_or_default();
                                                     app.clear_sudo_state();
                                                     if !cmd.is_empty() {
-                                                        let output = nsh::execute_command(&cmd);
-                                                        if !output.is_empty() {
-                                                            let cwd = std::env::current_dir()
-                                                                .map(|p| p.to_string_lossy().to_string())
-                                                                .unwrap_or_else(|_| "~".to_string());
-                                                            app.add_entry(Entry {
-                                                                entry_type: EntryType::Output,
-                                                                content: output,
-                                                                cwd,
-                                                            });
-                                                        }
+                                                        run_command_in_terminal_or_capture(&mut terminal, &mut app, &cmd)?;
                                                     }
                                                 }
                                                 Err(err) => {
@@ -284,6 +340,7 @@ fn main() -> std::io::Result<()> {
                                         });
                                         app.current_input.clear();
                                         app.cursor_position = 0;
+                                        app.input_scroll_x = 0;
                                         app.history_index = None;
                                         app.show_suggestions = false;
                                     }
@@ -365,6 +422,7 @@ fn main() -> std::io::Result<()> {
                                                 // Clear input immediately so the loading UI is obvious.
                                                 app.current_input.clear();
                                                 app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
                                                 app.show_suggestions = false;
                                                 app.current_suggestions.clear();
 
@@ -558,14 +616,7 @@ fn main() -> std::io::Result<()> {
                                                             handled_via_gui = true;
                                                             match nsh::validate_and_cache_sudo_password(&pass) {
                                                                 Ok(()) => {
-                                                                    let output = nsh::execute_command(&input);
-                                                                    if !output.is_empty() {
-                                                                        app.add_entry(Entry {
-                                                                            entry_type: EntryType::Output,
-                                                                            content: output,
-                                                                            cwd: String::new(),
-                                                                        });
-                                                                    }
+                                                                    run_command_in_terminal_or_capture(&mut terminal, &mut app, &input)?;
                                                                 }
                                                                 Err(err) => {
                                                                     app.add_entry(Entry {
@@ -585,38 +636,13 @@ fn main() -> std::io::Result<()> {
                                                         app.sudo_error = None;
                                                     }
                                                 } else {
-                                                    let output = nsh::execute_command(&input);
-                                                    if output.iter().any(|s| s == "__SETTINGS__") {
-                                                        app.settings_state = load_settings_state();
-                                                        app.show_settings = true;
-                                                        app.settings_cursor = 0;
-                                                        app.settings_input.clear();
-                                                        app.settings_nav.clear();
-
-                                                        let base_url =
-                                                            app.settings_state.base_url.clone();
-                                                        let provider = app.settings_state.provider;
-                                                        let rt =
-                                                            tokio::runtime::Runtime::new().unwrap();
-                                                        app.settings_state.available_models = rt
-                                                            .block_on(fetch_models(
-                                                                provider, &base_url,
-                                                            ));
-                                                    } else if output.iter().any(|s| s == "__CLEAR__") {
-                                                        app.clear();
-                                                        terminal.clear()?;
-                                                    } else if !output.is_empty() {
-                                                        app.add_entry(Entry {
-                                                            entry_type: EntryType::Output,
-                                                            content: output,
-                                                            cwd: String::new(),
-                                                        });
-                                                    }
+                                                    run_command_in_terminal_or_capture(&mut terminal, &mut app, &input)?;
                                                 }
                                             }
                                         }
                                         app.current_input.clear();
                                         app.cursor_position = 0;
+                                        app.input_scroll_x = 0;
                                         app.saved_input.clear();
                                         app.history_index = None;
                                         app.show_suggestions = false;
@@ -898,6 +924,17 @@ fn main() -> std::io::Result<()> {
                                                 app.focus = Focus::Input;
                                                 app.selection = None;
                                                 app.status_message = None;
+
+                                                let prompt_len = 2; // "> "
+                                                if mouse.column >= prompt_len {
+                                                    let col_in_slice = (mouse.column - prompt_len) as usize;
+                                                    let char_idx = app.input_scroll_x + col_in_slice;
+                                                    let byte_pos = app.current_input.char_indices()
+                                                        .nth(char_idx)
+                                                        .map(|(i, _)| i)
+                                                        .unwrap_or(app.current_input.len());
+                                                    app.cursor_position = byte_pos;
+                                                }
                                             }
                                         }
                                         MouseEventKind::Drag(MouseButton::Left) => {
@@ -931,7 +968,9 @@ fn main() -> std::io::Result<()> {
                                     }
                                 }
                                 if mouse.kind == MouseEventKind::ScrollUp {
-                                    if app.show_settings {
+                                    if mouse.row >= input_y && app.focus == Focus::Input {
+                                        app.input_scroll_x = app.input_scroll_x.saturating_sub(4);
+                                    } else if app.show_settings {
                                         app.settings_move_up();
                                     } else if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_up();
@@ -940,7 +979,10 @@ fn main() -> std::io::Result<()> {
                                             app.scroll_offset.saturating_sub(MOUSE_SCROLL_STEP);
                                     }
                                 } else if mouse.kind == MouseEventKind::ScrollDown {
-                                    if app.show_settings {
+                                    if mouse.row >= input_y && app.focus == Focus::Input {
+                                        let max_input_scroll = app.current_input.chars().count();
+                                        app.input_scroll_x = (app.input_scroll_x + 4).min(max_input_scroll);
+                                    } else if app.show_settings {
                                         app.settings_move_down();
                                     } else if app.show_suggestions && app.has_more_suggestions() {
                                         app.suggestion_page_down();

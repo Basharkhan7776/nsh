@@ -156,6 +156,273 @@ pub fn has_unquoted_shell_metachars(input: &str) -> bool {
     false
 }
 
+/// Check if a command is interactive and requires direct terminal TTY access (editors, TUIs, pagers, REPLs).
+pub fn is_interactive_command(input: &str) -> bool {
+    let input = input.trim();
+    if input.is_empty() {
+        return false;
+    }
+
+    let tokens = parse_command_line(input);
+    if tokens.is_empty() {
+        return false;
+    }
+
+    // Explicit user prefixes for any external TUI or interactive binary: "tui ...", "term ...", "interactive ..."
+    if matches!(tokens[0].as_str(), "tui" | "term" | "interactive") {
+        return true;
+    }
+
+    // Inspect command, stripping leading sudo/doas and their flags
+    let mut cmd_tokens = &tokens[..];
+    if cmd_tokens[0] == "sudo" || cmd_tokens[0] == "doas" {
+        let mut idx = 1;
+        while idx < cmd_tokens.len() {
+            let t = &cmd_tokens[idx];
+            if t.starts_with('-') {
+                if matches!(t.as_str(), "-u" | "-g" | "-C" | "-D" | "-R" | "-h" | "-p") {
+                    idx += 2;
+                } else if matches!(t.as_str(), "-i" | "-s") {
+                    return true;
+                } else {
+                    idx += 1;
+                }
+            } else {
+                break;
+            }
+        }
+        if idx >= cmd_tokens.len() {
+            return true;
+        }
+        cmd_tokens = &cmd_tokens[idx..];
+    }
+
+    if cmd_tokens.is_empty() {
+        return false;
+    }
+
+    let raw_program = &cmd_tokens[0];
+    let program = std::path::Path::new(raw_program)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or(raw_program.as_str());
+    let args: Vec<&str> = cmd_tokens.iter().skip(1).map(|s| s.as_str()).collect();
+
+    // 1. Text editors
+    if matches!(
+        program,
+        "nvim"
+            | "vim"
+            | "vi"
+            | "nano"
+            | "emacs"
+            | "helix"
+            | "hx"
+            | "micro"
+            | "kak"
+            | "ed"
+            | "pico"
+            | "joe"
+            | "vis"
+            | "ne"
+            | "view"
+    ) {
+        return true;
+    }
+
+    // 2. Interactive system / process monitors (TUIs)
+    if matches!(
+        program,
+        "htop"
+            | "top"
+            | "btop"
+            | "glances"
+            | "nvtop"
+            | "iotop"
+            | "iftop"
+            | "nethogs"
+            | "powertop"
+            | "tiptop"
+            | "viddy"
+            | "ctop"
+            | "bashtop"
+    ) {
+        return true;
+    }
+
+    // 3. Pagers / manual pages
+    if matches!(program, "less" | "more" | "man" | "pager" | "info") {
+        return true;
+    }
+
+    // 4. Terminal file managers
+    if matches!(
+        program,
+        "ranger"
+            | "yazi"
+            | "nnn"
+            | "lf"
+            | "mc"
+            | "midnight-commander"
+            | "broot"
+            | "vifm"
+            | "clifm"
+    ) {
+        return true;
+    }
+
+    // 5. Git TUIs & interactive git workflows
+    if matches!(program, "lazygit" | "tig" | "gitui") {
+        return true;
+    }
+    if program == "git" {
+        if let Some(sub) = args.first() {
+            match *sub {
+                "commit" => {
+                    let has_m = args.iter().any(|a| {
+                        *a == "-m"
+                            || a.starts_with("-m=")
+                            || *a == "--message"
+                            || a.starts_with("--message=")
+                            || *a == "-F"
+                            || *a == "-C"
+                            || *a == "-c"
+                    });
+                    if !has_m {
+                        return true;
+                    }
+                }
+                "rebase" => {
+                    if args.iter().any(|a| *a == "-i" || *a == "--interactive") {
+                        return true;
+                    }
+                }
+                "add" | "checkout" | "reset" | "stash" => {
+                    if args.iter().any(|a| {
+                        *a == "-p" || *a == "--patch" || *a == "-i" || *a == "--interactive"
+                    }) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // 6. Multiplexers & remote shells
+    if matches!(
+        program,
+        "tmux"
+            | "screen"
+            | "zellij"
+            | "byobu"
+            | "ssh"
+            | "mosh"
+            | "telnet"
+            | "ftp"
+            | "sftp"
+            | "nmtui"
+            | "ncmpcpp"
+    ) {
+        return true;
+    }
+
+    // 7. Interactive Debuggers & database / REPL shells
+    if matches!(
+        program,
+        "gdb"
+            | "lldb"
+            | "irb"
+            | "pry"
+            | "ipython"
+            | "bpython"
+            | "sqlite3"
+            | "psql"
+            | "mysql"
+            | "mongosh"
+            | "redis-cli"
+    ) {
+        return true;
+    }
+
+    // 8. Shells & general REPLs when invoked interactively (without a script file or -c)
+    if matches!(
+        program,
+        "bash" | "zsh" | "fish" | "sh" | "csh" | "tcsh" | "dash" | "ksh"
+    ) {
+        let has_script = args.iter().any(|a| *a == "-c" || !a.starts_with('-'));
+        if !has_script {
+            return true;
+        }
+    }
+
+    if matches!(
+        program,
+        "python" | "python3" | "node" | "deno" | "bun" | "ruby" | "perl" | "php" | "lua"
+    ) {
+        let is_repl = args.is_empty() || args.iter().any(|a| *a == "-i" || *a == "-a");
+        let has_script_file = args.iter().any(|a| !a.starts_with('-'));
+        if is_repl && !has_script_file {
+            return true;
+        }
+    }
+
+    // 9. Interactive authentication prompts
+    if matches!(program, "passwd" | "su") {
+        return true;
+    }
+
+    false
+}
+
+/// Execute an interactive command with direct terminal I/O (inherited stdin, stdout, stderr).
+pub fn execute_interactive_command(input: &str) -> Result<std::process::ExitStatus, String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    // Strip explicit prefixes like "tui " or "term " or "interactive "
+    let clean_input = if let Some(rest) = input.strip_prefix("tui ") {
+        rest.trim()
+    } else if let Some(rest) = input.strip_prefix("term ") {
+        rest.trim()
+    } else if let Some(rest) = input.strip_prefix("interactive ") {
+        rest.trim()
+    } else {
+        input
+    };
+
+    let tokens = parse_command_line(clean_input);
+    if tokens.is_empty() {
+        return Err("Empty command".to_string());
+    }
+
+    use std::process::{Command, Stdio};
+
+    let mut cmd = if has_unquoted_shell_metachars(clean_input) {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(clean_input);
+        c
+    } else {
+        let program = &tokens[0];
+        let raw_args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
+        let mut c = Command::new(program);
+        c.args(&raw_args);
+        c
+    };
+
+    match cmd
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+    {
+        Ok(status) => Ok(status),
+        Err(e) => Err(format!("{}: {}", tokens[0], e)),
+    }
+}
+
 // Execute shell command and return output lines (one display row each).
 pub fn execute_command(input: &str) -> Vec<String> {
     let input = input.trim();
@@ -472,5 +739,54 @@ mod tests {
         assert!(!command_needs_sudo_password("git status"));
         assert!(!command_needs_sudo_password("cargo check"));
         assert!(!command_needs_sudo_password(""));
+    }
+
+    #[test]
+    fn test_is_interactive_command() {
+        // Editors
+        assert!(is_interactive_command("nvim"));
+        assert!(is_interactive_command("nvim src/main.rs"));
+        assert!(is_interactive_command("nano /tmp/test.txt"));
+        assert!(is_interactive_command("vim file.rs"));
+        assert!(is_interactive_command("vi file.rs"));
+        assert!(is_interactive_command("helix"));
+        assert!(is_interactive_command("hx"));
+        assert!(is_interactive_command("micro test.txt"));
+
+        // Sudo with editors
+        assert!(is_interactive_command("sudo nvim /etc/hosts"));
+        assert!(is_interactive_command("sudo nano /etc/hosts"));
+        assert!(is_interactive_command("sudo -E nvim"));
+        assert!(is_interactive_command("sudo -i"));
+
+        // TUIs & Monitors
+        assert!(is_interactive_command("htop"));
+        assert!(is_interactive_command("top"));
+        assert!(is_interactive_command("btop"));
+        assert!(is_interactive_command("lazygit"));
+        assert!(is_interactive_command("ranger"));
+        assert!(is_interactive_command("yazi"));
+        assert!(is_interactive_command("tmux"));
+
+        // Pagers
+        assert!(is_interactive_command("less README.md"));
+        assert!(is_interactive_command("man ls"));
+
+        // Explicit TUI prefix for custom binaries
+        assert!(is_interactive_command("tui ./my_custom_app"));
+        assert!(is_interactive_command("term cargo run"));
+
+        // Git interactive commands
+        assert!(is_interactive_command("git commit"));
+        assert!(!is_interactive_command("git commit -m \"initial commit\""));
+        assert!(is_interactive_command("git rebase -i HEAD~3"));
+        assert!(is_interactive_command("git add -p"));
+
+        // Non-interactive commands
+        assert!(!is_interactive_command("ls -la"));
+        assert!(!is_interactive_command("cat Cargo.toml"));
+        assert!(!is_interactive_command("git status"));
+        assert!(!is_interactive_command("cargo test"));
+        assert!(!is_interactive_command("echo hello world"));
     }
 }

@@ -1,4 +1,4 @@
 - AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible
 - What ever process is running from ai would reflect in tui like do, build and plan have, agent thingking loop, command and its outputs and even grap and all also I can mention @ any files and folder in that dir in can mention inside the multiple folders files like grok build did
-- input wont go to next like or extends have scroll bar in it to show whole input text in it
+- input won't go to next like or extends have scroll bar in it to show whole input text in it
 - nvim, nano, vim is not opening

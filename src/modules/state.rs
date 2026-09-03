@@ -188,6 +188,7 @@ pub struct App {
     pub pending_sudo_command: Option<String>,       // Original command waiting for sudo auth
     pub sudo_error: Option<String>,                 // Sudo auth error message
     pub sudo_prompt_mode: SudoPromptMode,           // Sudo prompt type (TuiModal / DesktopGui / Auto)
+    pub input_scroll_x: usize,                      // Horizontal scroll offset for input
 }
 
 impl App {
@@ -223,6 +224,7 @@ impl App {
             pending_sudo_command: None,
             sudo_error: None,
             sudo_prompt_mode: SudoPromptMode::default(),
+            input_scroll_x: 0,
         }
     }
 

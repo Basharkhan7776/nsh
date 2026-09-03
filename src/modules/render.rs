@@ -393,27 +393,89 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     } else {
         (PROMPT_TEXT, app.current_input.as_str())
     };
+
+    let prompt_cols = prompt.chars().count() as u16;
+    // Available horizontal width for the text portion (single line, horizontal extend & scroll)
+    let text_avail = (input_area.width.saturating_sub(pad_left + prompt_cols + 1) as usize).max(1);
+
+    let body_chars: Vec<char> = body.chars().collect();
+    let total_chars = body_chars.len();
+
+    let cursor_char_idx = if app.focus == super::state::Focus::Input && app.ai_loading.is_none() {
+        before.chars().count()
+    } else {
+        0
+    };
+
+    // Calculate horizontal scroll in X so cursor and long input stay visible without wrapping
+    if app.focus == super::state::Focus::Input && app.ai_loading.is_none() {
+        if cursor_char_idx < app.input_scroll_x {
+            app.input_scroll_x = cursor_char_idx;
+        } else if cursor_char_idx >= app.input_scroll_x + text_avail {
+            app.input_scroll_x = cursor_char_idx.saturating_sub(text_avail) + 1;
+        }
+        if total_chars <= text_avail {
+            app.input_scroll_x = 0;
+        } else {
+            let max_scroll = total_chars.saturating_sub(text_avail);
+            if app.input_scroll_x > max_scroll && cursor_char_idx <= total_chars {
+                app.input_scroll_x = max_scroll;
+            }
+        }
+    } else {
+        app.input_scroll_x = 0;
+    }
+
+    let start_idx = app.input_scroll_x.min(total_chars);
+    let end_idx = (start_idx + text_avail).min(total_chars);
+    let visible_body: String = body_chars[start_idx..end_idx].iter().collect();
+
     let input_line = Line::from(vec![
         Span::styled(prompt, input_style),
-        Span::styled(body, Style::default().fg(OUTPUT_FG).bg(INPUT_BG)),
+        Span::styled(visible_body, Style::default().fg(OUTPUT_FG).bg(INPUT_BG)),
     ]);
     let input_block = Block::default()
         .style(input_style)
-        .padding(ratatui::widgets::Padding::new(pad_left, 0, pad_top, 1));
+        .padding(ratatui::widgets::Padding::new(pad_left, 0, pad_top, 0));
     let input_widget = Paragraph::new(input_line)
         .style(input_style)
         .block(input_block);
     f.render_widget(input_widget, input_area);
 
+    // Render horizontal scrollbar in X when input exceeds available width
+    if total_chars > text_avail
+        && app.focus == super::state::Focus::Input
+        && app.ai_loading.is_none()
+        && input_area.height >= 3
+    {
+        let sb_y = input_area.y.saturating_add(2);
+        let sb_x = input_area.x.saturating_add(pad_left).saturating_add(prompt_cols);
+        let sb_w = input_area.width.saturating_sub(pad_left + prompt_cols);
+        if sb_w > 2 {
+            let sb_area = Rect::new(sb_x, sb_y, sb_w, 1);
+            let x_scrollbar = Scrollbar::new(ScrollbarOrientation::HorizontalBottom)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .track_symbol(Some("─"))
+                .track_style(Style::default().fg(Color::Rgb(50, 50, 50)).bg(INPUT_BG))
+                .thumb_symbol("━")
+                .thumb_style(Style::default().fg(Color::Rgb(160, 160, 160)).bg(INPUT_BG));
+
+            let max_scroll = total_chars.saturating_sub(text_avail);
+            let mut x_scrollbar_state = ScrollbarState::new(max_scroll)
+                .position(app.input_scroll_x);
+            f.render_stateful_widget(x_scrollbar, sb_area, &mut x_scrollbar_state);
+        }
+    }
+
     // Hide cursor while AI is loading, output is focused, or sudo prompt is active.
     if app.ai_loading.is_none() && app.focus == super::state::Focus::Input && !app.show_sudo_prompt {
-        let prompt_cols = PROMPT_TEXT.chars().count() as u16;
-        let text_cols = before.chars().count() as u16;
+        let visible_cursor_offset = cursor_char_idx.saturating_sub(start_idx) as u16;
         let cursor_x = input_area
             .x
             .saturating_add(pad_left)
             .saturating_add(prompt_cols)
-            .saturating_add(text_cols);
+            .saturating_add(visible_cursor_offset);
         let cursor_y = input_area.y.saturating_add(pad_top);
         let max_x = input_area
             .x
@@ -1510,5 +1572,32 @@ mod tests {
         assert!(text.contains("••••••••••"));
         assert!(text.contains("[Enter]"));
         assert!(text.contains("[Esc]"));
+    }
+
+    #[test]
+    fn test_render_input_horizontal_scroll_and_scrollbar() {
+        let backend = TestBackend::new(40, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        // Set a long input exceeding the 40-col screen width
+        let long_input = "build make a landing page from @index.html with 2 sections";
+        app.current_input = long_input.to_string();
+        app.cursor_position = long_input.len();
+
+        terminal
+            .draw(|f| {
+                render_shell(f, &mut app);
+            })
+            .unwrap();
+
+        // Horizontal scroll offset must have shifted so the end is visible
+        assert!(app.input_scroll_x > 0, "app.input_scroll_x should be > 0 for long input");
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        // Should contain end of long input (e.g. "sections")
+        assert!(text.contains("sections"), "Visible input should display scrolled content");
+        // Should contain the horizontal scrollbar thumb symbol
+        assert!(text.contains('━'), "Horizontal scrollbar in X should be rendered");
     }
 }
