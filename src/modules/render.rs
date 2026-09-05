@@ -386,10 +386,21 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     let pad_left: u16 = 0;
     let cursor_byte = app.cursor_position.min(app.current_input.len());
     let before = &app.current_input[..cursor_byte];
+    let is_plan_review = app.active_plan_session.is_some();
+    let is_placeholder = app.ai_loading.is_some()
+        || app.focus == super::state::Focus::Output
+        || (is_plan_review && app.current_input.is_empty());
+
     let (prompt, body) = if app.ai_loading.is_some() {
         (" … ", "(AI is working — wait for response)")
     } else if app.focus == super::state::Focus::Output {
         ("", "Press i or enter to type")
+    } else if is_plan_review {
+        if app.current_input.is_empty() {
+            ("> [plan] ", "Type 'approve', 'deny', or suggestion to refine...")
+        } else {
+            ("> [plan] ", app.current_input.as_str())
+        }
     } else {
         (PROMPT_TEXT, app.current_input.as_str())
     };
@@ -401,14 +412,14 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     let body_chars: Vec<char> = body.chars().collect();
     let total_chars = body_chars.len();
 
-    let cursor_char_idx = if app.focus == super::state::Focus::Input && app.ai_loading.is_none() {
+    let cursor_char_idx = if app.focus == super::state::Focus::Input && app.ai_loading.is_none() && !is_placeholder {
         before.chars().count()
     } else {
         0
     };
 
     // Calculate horizontal scroll in X so cursor and long input stay visible without wrapping
-    if app.focus == super::state::Focus::Input && app.ai_loading.is_none() {
+    if app.focus == super::state::Focus::Input && app.ai_loading.is_none() && !is_placeholder {
         if cursor_char_idx < app.input_scroll_x {
             app.input_scroll_x = cursor_char_idx;
         } else if cursor_char_idx >= app.input_scroll_x + text_avail {
@@ -430,9 +441,15 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     let end_idx = (start_idx + text_avail).min(total_chars);
     let visible_body: String = body_chars[start_idx..end_idx].iter().collect();
 
+    let body_style = if is_placeholder {
+        Style::default().fg(Color::Rgb(120, 120, 120)).bg(INPUT_BG)
+    } else {
+        Style::default().fg(OUTPUT_FG).bg(INPUT_BG)
+    };
+
     let input_line = Line::from(vec![
         Span::styled(prompt, input_style),
-        Span::styled(visible_body, Style::default().fg(OUTPUT_FG).bg(INPUT_BG)),
+        Span::styled(visible_body, body_style),
     ]);
     let input_block = Block::default()
         .style(input_style)

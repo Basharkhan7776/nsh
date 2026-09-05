@@ -28,10 +28,10 @@ impl AiCommand {
 
     pub fn max_steps(&self) -> usize {
         match self {
-            AiCommand::Ask => 1,
+            AiCommand::Ask => 2,
             AiCommand::Do => 10,
-            AiCommand::Plan => 2,
-            AiCommand::Build => 12,
+            AiCommand::Plan => 8,
+            AiCommand::Build => 20,
         }
     }
 
@@ -47,35 +47,71 @@ impl AiCommand {
             }
             AiCommand::Do => {
                 "You are an agent that executes terminal tasks using tools.\n\
-                 Available tools: cd, touch, ls, cat, write_file, mkdir, delete_path, copy_path, move_path, grep, exec_cmd.\n\
+                 Available tools: cd, touch, ls, cat, write_file, edit_file, mkdir, delete_path, copy_path, move_path, grep, exec_cmd.\n\
                  Execute the requested task step-by-step using the appropriate tools.\n\
+                 If modifying an existing file, prefer edit_file (using start_line/end_line or target) instead of rewriting the entire file.\n\
                  If the user asks for sequential operations (e.g. 'cd then touch then ls'), execute each step in order.\n\
                  If the user asks for only a single operation, execute just that one operation.\n\
-                 Tool call format (exact):\n\
+                 Tool call formats (use any format):\n\
+                 Format 1 (JSON):\n\
                  TOOL: tool_name\n\
-                 ARGS: {json}\n\
+                 ARGS: {\"path\": \"...\", \"content\": \"...\"}\n\
+                 Format 2 (for write_file):\n\
+                 TOOL: write_file\n\
+                 PATH: filename.ext\n\
+                 CONTENT:\n\
+                 <file content here>\n\
+                 Format 3 (for edit_file):\n\
+                 TOOL: edit_file\n\
+                 PATH: filename.ext\n\
+                 START_LINE: 10\n\
+                 END_LINE: 15\n\
+                 REPLACEMENT:\n\
+                 <replacement lines here>\n\
                  After each tool call, the system provides the Observation. Continue calling tools until the entire task is complete.\n\
                  When all requested operations are finished, respond with DONE and no more tool calls.\n\
                  Do not provide conversational commentary or summaries."
             }
             AiCommand::Plan => {
-                "You are a planning assistant. Produce a clear, numbered step-by-step plan for the goal.\n\
-                 Use read-only tools (ls, cat, grep, web_search) only if they help discover facts for the plan.\n\
-                 Do not perform destructive actions. At the end, output the plan clearly."
+                "You are an expert software planning assistant.\n\
+                 Your job is to produce a clear, comprehensive, and well-structured Markdown implementation plan for the user's goal.\n\
+                 You can use read-only tools (ls, cat, grep, web_search) to explore existing code, structure, and dependencies before creating the plan.\n\
+                 Do NOT modify files or perform destructive actions in planning mode.\n\
+                 Format the plan in GitHub Flavored Markdown with the following sections:\n\
+                 # Implementation Plan: <Goal Title>\n\
+                 ## 1. Overview & Architecture\n\
+                 ## 2. Proposed Changes & Files to Create / Modify\n\
+                 ## 3. Step-by-Step Execution Plan\n\
+                 ## 4. Verification & Testing Strategy\n\
+                 Be concrete, detailed, and actionable. When the plan is ready, output the Markdown document directly."
             }
             AiCommand::Build => {
                 "You are an autonomous agentic software builder (similar to Grok Build).\n\
                  Your job is to build, code, and create complete working projects, features, and files.\n\
                  Follow this workflow:\n\
                  1. If needed, explore existing files with ls, cat, or grep.\n\
-                 2. Write complete, high-quality, production-ready code using write_file. Do not truncate code or leave placeholders.\n\
-                 3. Create directories with mkdir if needed.\n\
-                 4. You can execute shell commands or tests with exec_cmd.\n\
-                 Tool call format (must be valid JSON):\n\
+                 2. To create new files, use write_file.\n\
+                 3. To modify or update existing files, prefer edit_file (using start_line/end_line or target) so you do not need to rewrite the entire file.\n\
+                 4. Create directories with mkdir if needed.\n\
+                 5. You can execute shell commands or tests with exec_cmd.\n\
+                 TOOL CALL FORMATS:\n\
+                 Format 1:\n\
                  TOOL: tool_name\n\
                  ARGS: {\"path\": \"...\", \"content\": \"...\"}\n\
+                 Format 2 (Recommended for write_file):\n\
+                 TOOL: write_file\n\
+                 PATH: path/to/file.ext\n\
+                 CONTENT:\n\
+                 <file content here>\n\
+                 Format 3 (Recommended for edit_file):\n\
+                 TOOL: edit_file\n\
+                 PATH: path/to/file.ext\n\
+                 START_LINE: 10\n\
+                 END_LINE: 15\n\
+                 REPLACEMENT:\n\
+                 <replacement lines here>\n\
                  After each tool call, you will receive the Observation. Continue calling tools until all files and tasks are fully built.\n\
-                 When finished building, output a short summary of created files and what was built."
+                 When finished building, output a short summary of created/modified files and what was built."
             }
         }
     }
@@ -359,6 +395,13 @@ fn extract_reasoning_thought(response: &str) -> Option<String> {
         lower.find("```"),
         lower.find("{\"tool\""),
         lower.find("{\"name\""),
+        lower.find("<｜dsml｜"),
+        lower.find("<|dsml|"),
+        lower.find("<tool_calls"),
+        lower.find("<invoke"),
+        lower.find("<|tool call"),
+        lower.find("<tool_call>"),
+        lower.find("<function="),
     ]
     .into_iter()
     .flatten()
@@ -395,6 +438,21 @@ fn format_tool_args_summary(tool_name: &str, args: &serde_json::Value) -> String
             let len = args.get("content").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0);
             format!("{} ({} bytes)", path, len)
         }
+        "edit_file" | "replace_file_content" | "patch_file" | "modify_file" | "edit" => {
+            let path = args.get("path").or_else(|| args.get("file")).and_then(|v| v.as_str()).unwrap_or("");
+            let start = args.get("start_line").or_else(|| args.get("start")).and_then(|v| v.as_u64());
+            let end = args.get("end_line").or_else(|| args.get("end")).and_then(|v| v.as_u64());
+            if let (Some(s), Some(e)) = (start, end) {
+                format!("{} lines {}-{}", path, s, e)
+            } else if let Some(s) = start {
+                format!("{} line {}", path, s)
+            } else if let Some(t) = args.get("target").or_else(|| args.get("old_str")).and_then(|v| v.as_str()) {
+                let preview = if t.len() > 20 { format!("{}...", &t[..20]) } else { t.to_string() };
+                format!("{} matching \"{}\"", path, preview.trim())
+            } else {
+                path.to_string()
+            }
+        }
         "mkdir" | "touch" | "delete_path" | "delete" | "rm" => {
             args.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string()
         }
@@ -425,6 +483,13 @@ fn format_tool_summary(tool_name: &str, tool_res: &serde_json::Value, args_summa
                 format!("[write_file] Created {} ({} bytes)", path, size)
             } else {
                 format!("[write_file] {}", args_summary)
+            }
+        }
+        "edit_file" | "replace_file_content" | "patch_file" | "modify_file" | "edit" => {
+            if let Some(s) = tool_res.get("summary").and_then(|v| v.as_str()) {
+                format!("[edit_file] {}", s)
+            } else {
+                format!("[edit_file] Modified {}", args_summary)
             }
         }
         "mkdir" => {
@@ -584,7 +649,15 @@ pub async fn run_ai_command(
                     }
                 }
 
-                let obs = format!("Observation (tool={}): {}", tool_name, tool_res);
+                let is_dsml = response.contains("DSML") || response.contains("tool_calls>") || response.contains("invoke");
+                let obs = if is_dsml {
+                    format!(
+                        "<｜DSML｜call_result name=\"{}\">\n{}\n</｜DSML｜call_result>\nObservation (tool={}): {}",
+                        tool_name, tool_res, tool_name, tool_res
+                    )
+                } else {
+                    format!("Observation (tool={}): {}", tool_name, tool_res)
+                };
                 history.push(obs);
             }
 
@@ -603,11 +676,16 @@ pub async fn run_ai_command(
         if let Some(ref ans) = final_answer {
             let clean = ans.trim();
             let lower = clean.to_lowercase();
+            let is_tool_tag = clean.starts_with("TOOL:")
+                || clean.contains("<｜DSML｜tool_calls>")
+                || clean.contains("<|DSML|tool_calls>")
+                || clean.contains("<tool_calls>")
+                || clean.contains("<invoke");
             if !clean.is_empty()
                 && lower != "done"
                 && lower != "done."
                 && !lower.starts_with("done")
-                && !clean.starts_with("TOOL:")
+                && !is_tool_tag
             {
                 if !result.is_empty() {
                     result.push(String::new());
@@ -694,6 +772,13 @@ fn format_tool_output_for_terminal(tool_name: &str, tool_res: &serde_json::Value
                     return vec![format!("[write_file] Created {} ({} bytes)", path, size)];
                 }
                 return vec![format!("[write_file] Written to {}", path)];
+            }
+        }
+        "edit_file" | "replace_file_content" | "patch_file" | "modify_file" | "edit" => {
+            if let Some(summary) = tool_res.get("summary").and_then(|v| v.as_str()) {
+                return vec![format!("[edit_file] {}", summary)];
+            } else if let Some(path) = tool_res.get("path").and_then(|v| v.as_str()) {
+                return vec![format!("[edit_file] Modified {}", path)];
             }
         }
         "mkdir" => {
@@ -854,10 +939,408 @@ fn sanitize_json_string(raw: &str) -> String {
     out
 }
 
+fn extract_quoted_string_value(s: &str) -> Option<String> {
+    let start_quote = s.find(|c| c == '"' || c == '\'')?;
+    let quote_char = s[start_quote..].chars().next().unwrap();
+    let rest = &s[start_quote + quote_char.len_utf8()..];
+    let end_quote = rest.find(quote_char)?;
+    Some(rest[..end_quote].to_string())
+}
+
+fn unescape_json_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            if let Some(&next) = chars.peek() {
+                match next {
+                    'n' => {
+                        out.push('\n');
+                        chars.next();
+                    }
+                    'r' => {
+                        out.push('\r');
+                        chars.next();
+                    }
+                    't' => {
+                        out.push('\t');
+                        chars.next();
+                    }
+                    '"' => {
+                        out.push('"');
+                        chars.next();
+                    }
+                    '\'' => {
+                        out.push('\'');
+                        chars.next();
+                    }
+                    '\\' => {
+                        out.push('\\');
+                        chars.next();
+                    }
+                    _ => {
+                        out.push(c);
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn strip_markdown_fences(s: &str) -> String {
+    let t = s.trim();
+    if let Some(rest) = t.strip_prefix("```") {
+        let after_lang = if let Some(newline_pos) = rest.find('\n') {
+            &rest[newline_pos + 1..]
+        } else {
+            rest
+        };
+        let without_end = if let Some(end_idx) = after_lang.rfind("```") {
+            &after_lang[..end_idx]
+        } else {
+            after_lang
+        };
+        without_end.trim_end().to_string()
+    } else {
+        t.to_string()
+    }
+}
+
+/// Robust raw extractor for write_file when standard JSON parsing fails or when code has unescaped quotes.
+fn extract_write_file_raw(text: &str) -> Option<(serde_json::Value, usize)> {
+    let t = text.trim_start();
+    let prefix_offset = text.len() - t.len();
+
+    // 1. Extract path
+    let path = if let Some(idx) = t.find("\"path\"") {
+        let after = &t[idx + 6..];
+        extract_quoted_string_value(after)
+    } else if let Some(idx) = t.find("\"file\"") {
+        let after = &t[idx + 6..];
+        extract_quoted_string_value(after)
+    } else if let Some(idx) = t.to_ascii_lowercase().find("path:") {
+        let after = &t[idx + 5..];
+        after.lines().next().map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+    } else {
+        None
+    }?;
+
+    // 2. Extract content
+    let (content, consumed) = if let Some(idx) = t.find("\"content\"") {
+        let after = &t[idx + 9..];
+        if let Some(colon_pos) = after.find(':') {
+            let after_colon = &after[colon_pos + 1..].trim_start();
+            if after_colon.starts_with('"') {
+                let inner = &after_colon[1..];
+                // Find last '"' that has only whitespace, '}', '```', or 'TOOL:' following it
+                let mut end_quote_idx = None;
+                let bytes = inner.as_bytes();
+                for i in (0..bytes.len()).rev() {
+                    if bytes[i] == b'"' {
+                        let rem = std::str::from_utf8(&bytes[i + 1..]).unwrap_or("");
+                        let rem_trimmed = rem.trim();
+                        if rem_trimmed.is_empty()
+                            || rem_trimmed.starts_with('}')
+                            || rem_trimmed.starts_with("```")
+                            || rem_trimmed.to_ascii_lowercase().starts_with("tool:")
+                        {
+                            end_quote_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(eq) = end_quote_idx {
+                    let raw_str = &inner[..eq];
+                    let unescaped = unescape_json_string(raw_str);
+                    let total_consumed = prefix_offset + (t.len() - after_colon.len()) + 1 + eq + 1;
+                    (unescaped, total_consumed)
+                } else {
+                    let unescaped = unescape_json_string(inner);
+                    (unescaped, text.len())
+                }
+            } else {
+                (String::new(), text.len())
+            }
+        } else {
+            (String::new(), text.len())
+        }
+    } else if let Some(idx) = t.to_ascii_lowercase().find("content:") {
+        let after = &t[idx + 8..];
+        let content_text = if let Some(next_tool) = after.to_ascii_lowercase().find("tool:") {
+            &after[..next_tool]
+        } else {
+            after
+        };
+        let cleaned = strip_markdown_fences(content_text.trim());
+        let len = content_text.len();
+        (cleaned, prefix_offset + idx + 8 + len)
+    } else if let Some(fence_start) = t.find("```") {
+        let after_fence = &t[fence_start..];
+        let cleaned = strip_markdown_fences(after_fence.trim());
+        let len = after_fence.len();
+        (cleaned, prefix_offset + fence_start + len)
+    } else {
+        return None;
+    };
+
+    Some((serde_json::json!({ "path": path, "content": content }), consumed))
+}
+
+/// Robust raw extractor for edit_file when standard JSON parsing fails or when replacement code has unescaped quotes.
+fn extract_edit_file_raw(text: &str) -> Option<(serde_json::Value, usize)> {
+    let t = text.trim_start();
+    let prefix_offset = text.len() - t.len();
+
+    // 1. Extract path
+    let path = if let Some(idx) = t.find("\"path\"") {
+        let after = &t[idx + 6..];
+        extract_quoted_string_value(after)
+    } else if let Some(idx) = t.find("\"file\"") {
+        let after = &t[idx + 6..];
+        extract_quoted_string_value(after)
+    } else if let Some(idx) = t.to_ascii_lowercase().find("path:") {
+        let after = &t[idx + 5..];
+        after.lines().next().map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+    } else {
+        None
+    }?;
+
+    let t_lower = t.to_ascii_lowercase();
+
+    // 2. Extract start_line / end_line numbers if present
+    let mut start_line = None;
+    let mut end_line = None;
+
+    if let Some(idx) = t_lower.find("start_line:") {
+        let after = &t_lower[idx + 11..];
+        if let Some(first_line) = after.lines().next() {
+            let digits: String = first_line.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+            start_line = digits.parse::<usize>().ok();
+        }
+    } else if let Some(idx) = t.find("\"start_line\"") {
+        let after = &t[idx + 12..];
+        if let Some(colon) = after.find(':') {
+            let num_str: String = after[colon + 1..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            start_line = num_str.parse::<usize>().ok();
+        }
+    }
+
+    if let Some(idx) = t_lower.find("end_line:") {
+        let after = &t_lower[idx + 9..];
+        if let Some(first_line) = after.lines().next() {
+            let digits: String = first_line.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+            end_line = digits.parse::<usize>().ok();
+        }
+    } else if let Some(idx) = t.find("\"end_line\"") {
+        let after = &t[idx + 10..];
+        if let Some(colon) = after.find(':') {
+            let num_str: String = after[colon + 1..].trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+            end_line = num_str.parse::<usize>().ok();
+        }
+    }
+
+    // 3. Extract replacement
+    let (replacement, consumed) = if let Some(idx) = t.find("\"replacement\"") {
+        let after = &t[idx + 13..];
+        if let Some(colon_pos) = after.find(':') {
+            let after_colon = &after[colon_pos + 1..].trim_start();
+            if after_colon.starts_with('"') {
+                let inner = &after_colon[1..];
+                let mut end_quote_idx = None;
+                let bytes = inner.as_bytes();
+                for i in (0..bytes.len()).rev() {
+                    if bytes[i] == b'"' {
+                        let rem = std::str::from_utf8(&bytes[i + 1..]).unwrap_or("");
+                        let rem_trimmed = rem.trim();
+                        if rem_trimmed.is_empty()
+                            || rem_trimmed.starts_with('}')
+                            || rem_trimmed.starts_with("```")
+                            || rem_trimmed.to_ascii_lowercase().starts_with("tool:")
+                        {
+                            end_quote_idx = Some(i);
+                            break;
+                        }
+                    }
+                }
+                if let Some(eq) = end_quote_idx {
+                    let raw_str = &inner[..eq];
+                    let unescaped = unescape_json_string(raw_str);
+                    let total_consumed = prefix_offset + (t.len() - after_colon.len()) + 1 + eq + 1;
+                    (unescaped, total_consumed)
+                } else {
+                    let unescaped = unescape_json_string(inner);
+                    (unescaped, text.len())
+                }
+            } else {
+                (String::new(), text.len())
+            }
+        } else {
+            (String::new(), text.len())
+        }
+    } else if let Some(idx) = t_lower.find("replacement:") {
+        let after = &t[idx + 12..];
+        let content_text = if let Some(next_tool) = after.to_ascii_lowercase().find("tool:") {
+            &after[..next_tool]
+        } else {
+            after
+        };
+        let cleaned = strip_markdown_fences(content_text.trim());
+        let len = content_text.len();
+        (cleaned, prefix_offset + idx + 12 + len)
+    } else {
+        (String::new(), text.len())
+    };
+
+    let mut map = serde_json::Map::new();
+    map.insert("path".to_string(), serde_json::json!(path));
+    if let Some(s) = start_line {
+        map.insert("start_line".to_string(), serde_json::json!(s));
+    }
+    if let Some(e) = end_line {
+        map.insert("end_line".to_string(), serde_json::json!(e));
+    }
+    map.insert("replacement".to_string(), serde_json::json!(replacement));
+
+    Some((serde_json::Value::Object(map), consumed))
+}
+
+fn unescape_xml_entities(s: &str) -> String {
+    if s.contains("&lt;") || s.contains("&gt;") || s.contains("&quot;") || s.contains("&apos;") || s.contains("&#39;") {
+        s.replace("&quot;", "\"")
+            .replace("&apos;", "'")
+            .replace("&#39;", "'")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Parse DSML, XML, and model-specific tool call tags like <｜DSML｜tool_calls>, <invoke>, and <|tool call begin|>
+pub fn parse_dsml_and_xml_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
+    let mut calls = Vec::new();
+    let norm = text.replace('\u{FF5C}', "|").replace('\u{2502}', "|");
+
+    // 1. Match <invoke name="...">...</invoke> (with optional DSML/other prefix)
+    if let Ok(invoke_re) = regex::Regex::new(r"(?is)<(?:/?\|?[a-zA-Z0-9_-]*\|?)?invoke\b[^>]*\bname=[`'\x22]([^\s`'\x22>]+)[`'\x22][^>]*>(.*?)(?:</(?:/?\|?[a-zA-Z0-9_-]*\|?)?invoke>|$)") {
+        if let Ok(param_re) = regex::Regex::new(r"(?is)<(?:/?\|?[a-zA-Z0-9_-]*\|?)?(?:parameter|param|arg)\b[^>]*\bname=[`'\x22]([^\s`'\x22>]+)[`'\x22][^>]*>(.*?)(?:</(?:/?\|?[a-zA-Z0-9_-]*\|?)?(?:parameter|param|arg)>|$)") {
+            for m in invoke_re.captures_iter(&norm) {
+                let tool_name = m.get(1).map(|s| s.as_str().trim().to_lowercase()).unwrap_or_default();
+                if tool_name.is_empty() {
+                    continue;
+                }
+                let body = m.get(2).map(|s| s.as_str()).unwrap_or("");
+                let mut args_map = serde_json::Map::new();
+                let mut found_params = false;
+
+                for pm in param_re.captures_iter(body) {
+                    found_params = true;
+                    let param_name = pm.get(1).map(|s| s.as_str().trim().to_string()).unwrap_or_default();
+                    let raw_val = pm.get(2).map(|s| s.as_str()).unwrap_or("");
+                    let unescaped = unescape_xml_entities(raw_val.trim());
+
+                    if let Ok(parsed_json) = serde_json::from_str::<serde_json::Value>(&unescaped) {
+                        if parsed_json.is_number() || parsed_json.is_boolean() || parsed_json.is_array() || parsed_json.is_object() {
+                            args_map.insert(param_name, parsed_json);
+                            continue;
+                        }
+                    }
+                    args_map.insert(param_name, serde_json::Value::String(unescaped));
+                }
+
+                if !found_params {
+                    if let Some(val) = extract_balanced_json(body) {
+                        calls.push((tool_name, val));
+                        continue;
+                    }
+                }
+
+                calls.push((tool_name, serde_json::Value::Object(args_map)));
+            }
+        }
+    }
+
+    if !calls.is_empty() {
+        return calls;
+    }
+
+    // 2. Match DeepSeek special token format: <|tool call begin|>(?:function<|tool sep|>)?name...<|tool call end|>
+    if let Ok(token_re) = regex::Regex::new(r"(?is)<\|tool call begin\|>(?:function<\|tool sep\|>)?([a-zA-Z0-9_-]+)(.*?)(?:<\|tool call end\|>|$)") {
+        for m in token_re.captures_iter(&norm) {
+            let tool_name = m.get(1).map(|s| s.as_str().trim().to_lowercase()).unwrap_or_default();
+            let raw_args = m.get(2).map(|s| s.as_str().trim()).unwrap_or("");
+            let clean_args = strip_markdown_fences(raw_args);
+            if let Some(val) = extract_balanced_json(&clean_args) {
+                calls.push((tool_name, val));
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(&clean_args) {
+                calls.push((tool_name, val));
+            } else {
+                calls.push((tool_name, serde_json::json!({ "raw": clean_args })));
+            }
+        }
+    }
+
+    if !calls.is_empty() {
+        return calls;
+    }
+
+    // 3. Match <function=tool_name>{"arg": "val"}</function>
+    if let Ok(func_re) = regex::Regex::new(r"(?is)<function=([a-zA-Z0-9_-]+)>(.*?)</function>") {
+        for m in func_re.captures_iter(&norm) {
+            let tool_name = m.get(1).map(|s| s.as_str().trim().to_lowercase()).unwrap_or_default();
+            let raw_args = m.get(2).map(|s| s.as_str().trim()).unwrap_or("");
+            if let Some(val) = extract_balanced_json(raw_args) {
+                calls.push((tool_name, val));
+            } else if let Ok(val) = serde_json::from_str::<serde_json::Value>(raw_args) {
+                calls.push((tool_name, val));
+            }
+        }
+    }
+
+    if !calls.is_empty() {
+        return calls;
+    }
+
+    // 4. Fallback: <tool_call> with JSON
+    if norm.contains("<tool_call>") {
+        let mut search_pos = 0;
+        while let Some(start) = norm[search_pos..].find("<tool_call>") {
+            let tag_start = search_pos + start + 11;
+            if let Some(end) = norm[tag_start..].find("</tool_call>") {
+                let inner = norm[tag_start..tag_start + end].trim();
+                if let Some(val) = extract_balanced_json(inner) {
+                    if let Some(name) = val.get("name").or_else(|| val.get("tool")).and_then(|v| v.as_str()) {
+                        let args = val.get("arguments").or_else(|| val.get("args")).cloned().unwrap_or(serde_json::json!({}));
+                        calls.push((name.to_lowercase(), args));
+                    }
+                }
+                search_pos = tag_start + end + 12;
+            } else {
+                break;
+            }
+        }
+    }
+
+    calls
+}
+
 /// Parse one or multiple tool calls from model output.
 pub fn parse_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
-    let mut calls = Vec::new();
     let t = text.trim();
+
+    // 0) First check for DSML, XML, and special token tool call formats
+    let dsml_calls = parse_dsml_and_xml_tool_calls(t);
+    if !dsml_calls.is_empty() {
+        return dsml_calls;
+    }
+
+    let mut calls = Vec::new();
 
     // 1) Case-insensitive search for "TOOL:"
     let t_lower = t.to_ascii_lowercase();
@@ -872,6 +1355,63 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
                 .to_lowercase();
 
             let after_tool_lower = &t_lower[tool_start + 5..];
+
+            // If tool is write_file, prioritize extracting path and content cleanly
+            if tool_name == "write_file" || tool_name == "write" {
+                let mut resolved = false;
+                if let Some(rel_args_idx) = after_tool_lower.find("args:") {
+                    let args_start = tool_start + 5 + rel_args_idx + 5;
+                    if args_start <= t.len() {
+                        let args_sub = &t[args_start..];
+                        if let Some((val, consumed)) = extract_balanced_json_with_len(args_sub) {
+                            if val.get("path").is_some() && val.get("content").is_some() {
+                                calls.push((tool_name.clone(), val));
+                                search_idx = std::cmp::min(args_start + consumed, t_lower.len());
+                                resolved = true;
+                            }
+                        }
+                    }
+                }
+                if !resolved {
+                    if let Some((val, consumed)) = extract_write_file_raw(after_tool) {
+                        calls.push((tool_name.clone(), val));
+                        search_idx = std::cmp::min(tool_start + 5 + consumed, t_lower.len());
+                        resolved = true;
+                    }
+                }
+                if resolved {
+                    continue;
+                }
+            }
+
+            // If tool is edit_file, prioritize extracting path and replacement cleanly
+            if tool_name == "edit_file" || tool_name == "replace_file_content" || tool_name == "patch_file" || tool_name == "modify_file" || tool_name == "edit" {
+                let mut resolved = false;
+                if let Some(rel_args_idx) = after_tool_lower.find("args:") {
+                    let args_start = tool_start + 5 + rel_args_idx + 5;
+                    if args_start <= t.len() {
+                        let args_sub = &t[args_start..];
+                        if let Some((val, consumed)) = extract_balanced_json_with_len(args_sub) {
+                            if val.get("path").is_some() {
+                                calls.push((tool_name.clone(), val));
+                                search_idx = std::cmp::min(args_start + consumed, t_lower.len());
+                                resolved = true;
+                            }
+                        }
+                    }
+                }
+                if !resolved {
+                    if let Some((val, consumed)) = extract_edit_file_raw(after_tool) {
+                        calls.push((tool_name.clone(), val));
+                        search_idx = std::cmp::min(tool_start + 5 + consumed, t_lower.len());
+                        resolved = true;
+                    }
+                }
+                if resolved {
+                    continue;
+                }
+            }
+
             if let Some(rel_args_idx) = after_tool_lower.find("args:") {
                 let args_start = tool_start + 5 + rel_args_idx + 5;
                 if args_start <= t.len() {
@@ -911,6 +1451,16 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
         let after_act_lower = &t_lower[act_idx + 7..];
         if let Some(input_idx) = after_act_lower.find("action input:") {
             let args_sub = &after_act[input_idx + 13..];
+            if tool_name == "write_file" || tool_name == "write" {
+                if let Some((val, _)) = extract_write_file_raw(args_sub) {
+                    return vec![(tool_name, val)];
+                }
+            }
+            if tool_name == "edit_file" || tool_name == "replace_file_content" || tool_name == "patch_file" || tool_name == "modify_file" || tool_name == "edit" {
+                if let Some((val, _)) = extract_edit_file_raw(args_sub) {
+                    return vec![(tool_name, val)];
+                }
+            }
             if let Some(val) = extract_balanced_json(args_sub) {
                 return vec![(tool_name, val)];
             }
@@ -921,11 +1471,11 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
     if let Some(val) = extract_balanced_json(t) {
         if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
             let args = val.get("arguments").cloned().unwrap_or(serde_json::json!({}));
-            return vec![(name.to_string(), args)];
+            return vec![(name.to_lowercase(), args)];
         }
         if let Some(name) = val.get("tool").and_then(|v| v.as_str()) {
             let args = val.get("args").cloned().unwrap_or(serde_json::json!({}));
-            return vec![(name.to_string(), args)];
+            return vec![(name.to_lowercase(), args)];
         }
     }
 
@@ -1093,6 +1643,132 @@ mod tests {
         assert!(extra.iter().any(|s| s.contains("folder_b") && s.contains("b.rs")));
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn test_parse_tool_calls_unescaped_html_and_css() {
+        let text = r#"TOOL: write_file
+ARGS: {"path": "index.html", "content": "<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Barber Shop</title>
+    <style>
+        :root { --dark: #0f0f0f; }
+        * { margin: 0; box-sizing: border-box; }
+    </style>
+</head>
+<body>
+    <h1>Welcome</h1>
+</body>
+</html>"}"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+        assert_eq!(calls[0].1["path"], "index.html");
+        let content = calls[0].1["content"].as_str().unwrap();
+        assert!(content.contains("<html lang=\"en\">"));
+        assert!(content.contains(":root { --dark: #0f0f0f; }"));
+        assert!(content.contains("<h1>Welcome</h1>"));
+    }
+
+    #[test]
+    fn test_parse_tool_calls_path_content_format() {
+        let text = "TOOL: write_file\nPATH: styles.css\nCONTENT:\nbody { background: #000; color: #fff; }";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "write_file");
+        assert_eq!(calls[0].1["path"], "styles.css");
+        assert_eq!(calls[0].1["content"], "body { background: #000; color: #fff; }");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_xml_tool_call_tag() {
+        let text = "<tool_call>\n{\"name\": \"exec_cmd\", \"arguments\": {\"cmd\": \"cargo build\"}}\n</tool_call>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "exec_cmd");
+        assert_eq!(calls[0].1["cmd"], "cargo build");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_edit_file_json() {
+        let text = "TOOL: edit_file\nARGS: {\"path\": \"src/main.rs\", \"start_line\": 10, \"end_line\": 15, \"replacement\": \"    let x = 42;\"}";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "edit_file");
+        assert_eq!(calls[0].1["path"], "src/main.rs");
+        assert_eq!(calls[0].1["start_line"], 10);
+        assert_eq!(calls[0].1["end_line"], 15);
+        assert_eq!(calls[0].1["replacement"], "    let x = 42;");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_edit_file_block_format() {
+        let text = "TOOL: edit_file\nPATH: index.html\nSTART_LINE: 5\nEND_LINE: 8\nREPLACEMENT:\n<p>Updated hero banner</p>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "edit_file");
+        assert_eq!(calls[0].1["path"], "index.html");
+        assert_eq!(calls[0].1["start_line"], 5);
+        assert_eq!(calls[0].1["end_line"], 8);
+        assert_eq!(calls[0].1["replacement"], "<p>Updated hero banner</p>");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_edit_file_unescaped_quotes() {
+        let text = r#"TOOL: edit_file
+ARGS: {"path": "src/App.tsx", "start_line": 20, "end_line": 25, "replacement": "<button className="primary" onClick={() => alert("clicked")}>Submit</button>"}"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "edit_file");
+        assert_eq!(calls[0].1["path"], "src/App.tsx");
+        assert_eq!(calls[0].1["start_line"], 20);
+        assert_eq!(calls[0].1["end_line"], 25);
+        assert!(calls[0].1["replacement"].as_str().unwrap().contains("className=\"primary\""));
+    }
+
+    #[test]
+    fn test_parse_tool_calls_deepseek_dsml() {
+        let text = "<｜DSML｜tool_calls>\n<｜DSML｜invoke name=\"ls\">\n<｜DSML｜parameter name=\"path\" string=\"true\">/home/bashar-khan/temp</｜DSML｜parameter>\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "ls");
+        assert_eq!(calls[0].1["path"], "/home/bashar-khan/temp");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_dsml_multiple_parameters_and_invokes() {
+        let text = r#"<｜DSML｜tool_calls>
+<｜DSML｜invoke name="edit_file">
+<｜DSML｜parameter name="path" string="true">index.html</｜DSML｜parameter>
+<｜DSML｜parameter name="start_line">10</｜DSML｜parameter>
+<｜DSML｜parameter name="end_line">15</｜DSML｜parameter>
+<｜DSML｜parameter name="replacement" string="true"><div class="hero">New Header</div></｜DSML｜parameter>
+</｜DSML｜invoke>
+<｜DSML｜invoke name="cat">
+<｜DSML｜parameter name="path" string="true">styles.css</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>"#;
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "edit_file");
+        assert_eq!(calls[0].1["path"], "index.html");
+        assert_eq!(calls[0].1["start_line"], 10);
+        assert_eq!(calls[0].1["end_line"], 15);
+        assert_eq!(calls[0].1["replacement"], "<div class=\"hero\">New Header</div>");
+        assert_eq!(calls[1].0, "cat");
+        assert_eq!(calls[1].1["path"], "styles.css");
+    }
+
+    #[test]
+    fn test_parse_tool_calls_deepseek_special_tokens() {
+        let text = "<|tool calls begin|><|tool call begin|>function<|tool sep|>ls\n```json\n{\"path\": \"/home/bashar-khan/temp\"}\n```<|tool call end|><|tool calls end|>";
+        let calls = parse_tool_calls(text);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "ls");
+        assert_eq!(calls[0].1["path"], "/home/bashar-khan/temp");
     }
 }
 

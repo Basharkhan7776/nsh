@@ -751,6 +751,21 @@ pub fn update_suggestions(app: &mut App) {
     let parsed = parse_input_at_cursor(&app.current_input, app.cursor_position);
     let mut suggestions: Vec<(String, String)> = Vec::new();
 
+    if app.active_plan_session.is_some() {
+        let token_lower = parsed.current_token.to_lowercase();
+        if "approve".starts_with(&token_lower) {
+            suggestions.push(("approve".to_string(), "approve (execute this plan)".to_string()));
+        }
+        if "deny".starts_with(&token_lower) {
+            suggestions.push(("deny".to_string(), "deny (discard plan)".to_string()));
+        }
+        app.current_suggestions = suggestions;
+        app.show_suggestions = !app.current_suggestions.is_empty();
+        app.selected_suggestion = 0;
+        app.suggestion_scroll_offset = 0;
+        return;
+    }
+
     if parsed.is_command_position {
         let token_lower = parsed.current_token.to_lowercase();
 

@@ -11,7 +11,7 @@ use crossterm::{
 };
 use nsh::{
     App, Entry, EntryType, Focus, LocalStorage, MAX_VISIBLE_SUGGESTIONS, MOUSE_SCROLL_STEP,
-    SCROLL_STEP, Selection, SudoPromptMode,
+    PlanSession, SCROLL_STEP, Selection, SudoPromptMode,
     ai::{
         ProviderType,
         agent::{AiCommand, run_ai_command, AgentUpdate},
@@ -111,12 +111,30 @@ fn run_command_in_terminal_or_capture(
         );
         let _ = terminal.clear();
 
-        if let Err(err_msg) = res {
-            app.add_entry(Entry {
-                entry_type: EntryType::Output,
-                content: vec![err_msg],
-                cwd: String::new(),
-            });
+        match res {
+            Ok(status) => {
+                if !status.success() {
+                    let code_str = match status.code() {
+                        Some(130) => String::new(), // Interrupted by Ctrl+C
+                        Some(code) => format!("Process exited with status {}", code),
+                        None => "Process terminated by signal".to_string(),
+                    };
+                    if !code_str.is_empty() {
+                        app.add_entry(Entry {
+                            entry_type: EntryType::Output,
+                            content: vec![code_str],
+                            cwd: String::new(),
+                        });
+                    }
+                }
+            }
+            Err(err_msg) => {
+                app.add_entry(Entry {
+                    entry_type: EntryType::Output,
+                    content: vec![err_msg],
+                    cwd: String::new(),
+                });
+            }
         }
         return Ok(());
     }
@@ -146,6 +164,228 @@ fn run_command_in_terminal_or_capture(
     }
 
     Ok(())
+}
+
+fn run_ai_task_with_ui(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    ai_cmd: AiCommand,
+    query: &str,
+    ai_cfg: &nsh::ai::AiConfig,
+) -> std::io::Result<Option<String>> {
+    let verb = match ai_cmd {
+        AiCommand::Ask => "Asking",
+        AiCommand::Do => "Doing",
+        AiCommand::Plan => "Planning",
+        AiCommand::Build => "Building",
+    };
+    let model = if ai_cfg.model.is_empty() {
+        "default".to_string()
+    } else {
+        ai_cfg.model.clone()
+    };
+
+    // Clear input immediately so the loading UI is obvious.
+    app.current_input.clear();
+    app.cursor_position = 0;
+    app.input_scroll_x = 0;
+    app.show_suggestions = false;
+    app.current_suggestions.clear();
+
+    // Start animated loading bar (must paint before work starts).
+    app.ai_loading = Some(AiLoadingState {
+        verb: verb.to_string(),
+        provider: ai_cfg.provider.to_string(),
+        model: model.clone(),
+        frame: 0,
+        current_step: 0,
+        max_steps: ai_cmd.max_steps(),
+        current_action: String::new(),
+    });
+    render(terminal, app)?;
+
+    // Run AI on a background thread with real-time update channel.
+    let (update_tx, update_rx) = mpsc::channel();
+    let ai_cfg_bg = ai_cfg.clone();
+    let query_bg = query.to_string();
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancel_bg = cancel_flag.clone();
+    std::thread::spawn(move || {
+        let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+        let rt = match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt,
+            Err(e) => {
+                let _ = update_tx.send(AgentUpdate::Error(format!("runtime: {e}")));
+                return;
+            }
+        };
+        let _ = rt.block_on(run_ai_command(
+            ai_cmd,
+            &query_bg,
+            ai_cfg_bg,
+            &storage,
+            Some(cancel_bg),
+            Some(update_tx),
+        ));
+    });
+
+    let mut final_result_text = None;
+
+    // Process live agent events & animate spinner until done
+    loop {
+        if let Some(ref mut loading) = app.ai_loading {
+            loading.frame = loading.frame.wrapping_add(1);
+        }
+
+        let mut task_completed = false;
+        while let Ok(update) = update_rx.try_recv() {
+            match update {
+                AgentUpdate::Thinking {
+                    step,
+                    max_steps,
+                    thought,
+                } => {
+                    let clean_thought = thought.trim();
+                    if let Some(ref mut loading) = app.ai_loading {
+                        loading.current_step = step + 1;
+                        loading.max_steps = max_steps;
+                        let short_thought = if clean_thought.len() > 40 {
+                            format!("{}...", &clean_thought[..37])
+                        } else {
+                            clean_thought.to_string()
+                        };
+                        loading.current_action = format!("Thinking: {}", short_thought);
+                    }
+                    if !clean_thought.is_empty() {
+                        app.add_entry(Entry {
+                            entry_type: EntryType::System,
+                            content: vec![format!(
+                                "> Thinking (step {}/{}): {}",
+                                step + 1,
+                                max_steps,
+                                clean_thought
+                            )],
+                            cwd: String::new(),
+                        });
+                    }
+                }
+                AgentUpdate::ToolStarted {
+                    step,
+                    tool,
+                    command_or_args,
+                } => {
+                    if let Some(ref mut loading) = app.ai_loading {
+                        loading.current_step = step + 1;
+                        let short_cmd = if command_or_args.len() > 35 {
+                            format!("{}...", &command_or_args[..32])
+                        } else {
+                            command_or_args.clone()
+                        };
+                        loading.current_action = format!("Running {} {}", tool, short_cmd);
+                    }
+                    app.add_entry(Entry {
+                        entry_type: EntryType::Command,
+                        content: vec![format!("$ [tool: {}] {}", tool, command_or_args)],
+                        cwd: String::new(),
+                    });
+                }
+                AgentUpdate::ToolOutput { tool: _, lines } => {
+                    if !lines.is_empty() {
+                        let display_lines = if lines.len() > 25 {
+                            let mut truncated = lines[..20].to_vec();
+                            truncated.push(format!("... ({} more lines)", lines.len() - 20));
+                            truncated
+                        } else {
+                            lines
+                        };
+                        app.add_entry(Entry {
+                            entry_type: EntryType::Output,
+                            content: display_lines,
+                            cwd: String::new(),
+                        });
+                    }
+                }
+                AgentUpdate::ToolFinished { tool: _, summary } => {
+                    if !summary.is_empty() {
+                        app.add_entry(Entry {
+                            entry_type: EntryType::Output,
+                            content: vec![summary],
+                            cwd: String::new(),
+                        });
+                    }
+                }
+                AgentUpdate::Completed {
+                    final_answer,
+                    tool_output_lines: _,
+                } => {
+                    app.ai_loading = None;
+                    if let Some(ref ans) = final_answer {
+                        let clean = ans.trim();
+                        let lower = clean.to_lowercase();
+                        if !clean.is_empty()
+                            && lower != "done"
+                            && lower != "done."
+                            && !lower.starts_with("done")
+                            && !clean.starts_with("TOOL:")
+                        {
+                            app.add_entry(Entry {
+                                entry_type: EntryType::Output,
+                                content: clean.lines().map(|s| s.to_string()).collect(),
+                                cwd: String::new(),
+                            });
+                        }
+                    }
+                    final_result_text = final_answer;
+                    task_completed = true;
+                    break;
+                }
+                AgentUpdate::Error(err_msg) => {
+                    app.ai_loading = None;
+                    app.add_entry(Entry {
+                        entry_type: EntryType::System,
+                        content: vec![format!("AI error: {}", err_msg)],
+                        cwd: String::new(),
+                    });
+                    task_completed = true;
+                    break;
+                }
+            }
+        }
+
+        if task_completed {
+            break;
+        }
+
+        render(terminal, app)?;
+
+        let mut user_cancelled = false;
+        while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+            if let Ok(Event::Key(key)) = event::read() {
+                if key.code == KeyCode::Esc
+                    || (key.code == KeyCode::Char('c')
+                        && key.modifiers.contains(KeyModifiers::CONTROL))
+                {
+                    user_cancelled = true;
+                    break;
+                }
+            }
+        }
+
+        if user_cancelled {
+            cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            app.ai_loading = None;
+            app.add_entry(Entry {
+                entry_type: EntryType::System,
+                content: vec!["^C [Process stopped by Esc]".to_string()],
+                cwd: String::new(),
+            });
+            break;
+        }
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    Ok(final_result_text)
 }
 
 fn main() -> std::io::Result<()> {
@@ -320,6 +560,16 @@ fn main() -> std::io::Result<()> {
                                     app.focus = Focus::Output;
                                     break;
                                 }
+
+                                if key_code == KeyCode::Esc && app.active_plan_session.is_some() && app.current_input.is_empty() {
+                                    app.clear_plan_session();
+                                    app.add_entry(Entry {
+                                        entry_type: EntryType::System,
+                                        content: vec!["[Plan Discarded] Returned to normal shell.".to_string()],
+                                        cwd: String::new(),
+                                    });
+                                    break;
+                                }
                                 app.status_message = None;
 
                                 let cwd = std::env::current_dir()
@@ -333,6 +583,7 @@ fn main() -> std::io::Result<()> {
                                         terminal.clear()?;
                                     }
                                     Action::Interrupt => {
+                                        app.clear_plan_session();
                                         app.add_entry(Entry {
                                             entry_type: EntryType::Command,
                                             content: vec!["^C".to_string()],
@@ -350,6 +601,102 @@ fn main() -> std::io::Result<()> {
                                         }
                                     }
                                     Action::Execute => {
+                                        if let Some(mut session) = app.active_plan_session.clone() {
+                                            let input = app.current_input.trim().to_string();
+                                            if input.is_empty() {
+                                                continue;
+                                            }
+                                            let lower = input.to_ascii_lowercase();
+                                            if lower == "approve" || lower == "yes" || lower == "y" || lower == "/approve" {
+                                                app.clear_plan_session();
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Command,
+                                                    content: vec![format!("approve (Iteration {})", session.iteration)],
+                                                    cwd: cwd.clone(),
+                                                });
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::System,
+                                                    content: vec![format!("[Plan Approved] Executing build for: {}", session.goal)],
+                                                    cwd: String::new(),
+                                                });
+
+                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let ai_cfg = storage.load_or_create_config().ai;
+                                                let build_prompt = format!(
+                                                    "Execute the following approved plan step-by-step to achieve the goal.\n\nApproved Plan:\n{}\n\nGoal: {}",
+                                                    session.current_plan, session.goal
+                                                );
+                                                run_ai_task_with_ui(&mut terminal, &mut app, AiCommand::Build, &build_prompt, &ai_cfg)?;
+                                            } else if lower == "deny" || lower == "no" || lower == "n" || lower == "cancel" || lower == "/deny" {
+                                                app.clear_plan_session();
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Command,
+                                                    content: vec![format!("deny (Iteration {})", session.iteration)],
+                                                    cwd: cwd.clone(),
+                                                });
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::System,
+                                                    content: vec!["[Plan Discarded] Returned to normal shell.".to_string()],
+                                                    cwd: String::new(),
+                                                });
+                                            } else {
+                                                session.iteration += 1;
+                                                let suggestion = input.clone();
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Command,
+                                                    content: vec![format!("suggestion (Iteration {}): {}", session.iteration, suggestion)],
+                                                    cwd: cwd.clone(),
+                                                });
+
+                                                let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
+                                                let ai_cfg = storage.load_or_create_config().ai;
+                                                let refine_prompt = format!(
+                                                    "User's original goal: {}\n\nCurrent Plan:\n{}\n\nUser Feedback / Suggestion:\n{}\n\nUpdate and refine the implementation plan incorporating the user's feedback. Output the complete updated Markdown plan.",
+                                                    session.goal, session.current_plan, suggestion
+                                                );
+
+                                                let updated_plan = run_ai_task_with_ui(
+                                                    &mut terminal,
+                                                    &mut app,
+                                                    AiCommand::Plan,
+                                                    &refine_prompt,
+                                                    &ai_cfg,
+                                                )?;
+                                                if let Some(plan_text) = updated_plan {
+                                                    let clean = plan_text.trim().to_string();
+                                                    if !clean.is_empty() {
+                                                        session.current_plan = clean.clone();
+                                                        let _ = std::fs::write("plan.md", &clean);
+                                                        app.active_plan_session = Some(session.clone());
+
+                                                        app.add_entry(Entry {
+                                                            entry_type: EntryType::System,
+                                                            content: vec![
+                                                                "──────────────────────────────────────────────────────────────────────".to_string(),
+                                                                format!("Plan updated (Iteration {}). Saved to plan.md.", session.iteration),
+                                                                "Actions:".to_string(),
+                                                                "  • 'approve' - Execute this plan with autonomous builder".to_string(),
+                                                                "  • 'deny'    - Cancel and discard plan".to_string(),
+                                                                "  • Type any suggestion or feedback to refine the plan".to_string(),
+                                                                "──────────────────────────────────────────────────────────────────────".to_string(),
+                                                            ],
+                                                            cwd: String::new(),
+                                                        });
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
+
                                         let input = app.current_input.clone();
                                         if input == "exit" || input == "quit" {
                                             running = false;
@@ -407,197 +754,41 @@ fn main() -> std::io::Result<()> {
                                                     .unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
 
-                                                let verb = match ai_cmd {
-                                                    AiCommand::Ask => "Asking",
-                                                    AiCommand::Do => "Doing",
-                                                    AiCommand::Plan => "Planning",
-                                                    AiCommand::Build => "Building",
-                                                };
-                                                let model = if ai_cfg.model.is_empty() {
-                                                    "default".to_string()
-                                                } else {
-                                                    ai_cfg.model.clone()
-                                                };
+                                                let final_answer = run_ai_task_with_ui(
+                                                    &mut terminal,
+                                                    &mut app,
+                                                    ai_cmd,
+                                                    &query,
+                                                    &ai_cfg,
+                                                )?;
 
-                                                // Clear input immediately so the loading UI is obvious.
-                                                app.current_input.clear();
-                                                app.cursor_position = 0;
-                                                app.input_scroll_x = 0;
-                                                app.show_suggestions = false;
-                                                app.current_suggestions.clear();
+                                                if ai_cmd == AiCommand::Plan {
+                                                    if let Some(plan_text) = final_answer {
+                                                        let clean = plan_text.trim().to_string();
+                                                        if !clean.is_empty() {
+                                                            let _ = std::fs::write("plan.md", &clean);
+                                                            let session = PlanSession {
+                                                                goal: query.clone(),
+                                                                current_plan: clean,
+                                                                iteration: 1,
+                                                            };
+                                                            app.active_plan_session = Some(session);
 
-                                                // Start animated loading bar (must paint before work starts).
-                                                app.ai_loading = Some(AiLoadingState {
-                                                    verb: verb.to_string(),
-                                                    provider: ai_cfg.provider.to_string(),
-                                                    model: model.clone(),
-                                                    frame: 0,
-                                                    current_step: 0,
-                                                    max_steps: ai_cmd.max_steps(),
-                                                    current_action: String::new(),
-                                                });
-                                                render(&mut terminal, &mut app)?;
-
-                                                // Run AI on a background thread with real-time update channel.
-                                                let (update_tx, update_rx) = mpsc::channel();
-                                                let ai_cfg_bg = ai_cfg.clone();
-                                                let query_bg = query.clone();
-                                                let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                                                let cancel_bg = cancel_flag.clone();
-                                                std::thread::spawn(move || {
-                                                    let storage = LocalStorage::new()
-                                                        .unwrap_or_else(|_| {
-                                                            LocalStorage::default()
-                                                        });
-                                                    let rt = match tokio::runtime::Runtime::new() {
-                                                        Ok(rt) => rt,
-                                                        Err(e) => {
-                                                            let _ = update_tx.send(AgentUpdate::Error(format!(
-                                                                "runtime: {e}"
-                                                            )));
-                                                            return;
-                                                        }
-                                                    };
-                                                    let _ = rt.block_on(run_ai_command(
-                                                         ai_cmd, &query_bg, ai_cfg_bg, &storage, Some(cancel_bg), Some(update_tx),
-                                                     ));
-                                                });
-
-                                                // Process live agent events & animate spinner until done
-                                                loop {
-                                                    if let Some(ref mut loading) = app.ai_loading {
-                                                        loading.frame = loading.frame.wrapping_add(1);
-                                                    }
-
-                                                    let mut task_completed = false;
-                                                    while let Ok(update) = update_rx.try_recv() {
-                                                        match update {
-                                                            AgentUpdate::Thinking { step, max_steps, thought } => {
-                                                                let clean_thought = thought.trim();
-                                                                if let Some(ref mut loading) = app.ai_loading {
-                                                                    loading.current_step = step + 1;
-                                                                    loading.max_steps = max_steps;
-                                                                    let short_thought = if clean_thought.len() > 40 {
-                                                                        format!("{}...", &clean_thought[..37])
-                                                                    } else {
-                                                                        clean_thought.to_string()
-                                                                    };
-                                                                    loading.current_action = format!("Thinking: {}", short_thought);
-                                                                }
-                                                                if !clean_thought.is_empty() {
-                                                                    app.add_entry(Entry {
-                                                                        entry_type: EntryType::System,
-                                                                        content: vec![format!("> Thinking (step {}/{}): {}", step + 1, max_steps, clean_thought)],
-                                                                        cwd: String::new(),
-                                                                    });
-                                                                }
-                                                            }
-                                                            AgentUpdate::ToolStarted { step, tool, command_or_args } => {
-                                                                if let Some(ref mut loading) = app.ai_loading {
-                                                                    loading.current_step = step + 1;
-                                                                    let short_cmd = if command_or_args.len() > 35 {
-                                                                        format!("{}...", &command_or_args[..32])
-                                                                    } else {
-                                                                        command_or_args.clone()
-                                                                    };
-                                                                    loading.current_action = format!("Running {} {}", tool, short_cmd);
-                                                                }
-                                                                app.add_entry(Entry {
-                                                                    entry_type: EntryType::Command,
-                                                                    content: vec![format!("$ [tool: {}] {}", tool, command_or_args)],
-                                                                    cwd: String::new(),
-                                                                });
-                                                            }
-                                                            AgentUpdate::ToolOutput { tool: _, lines } => {
-                                                                if !lines.is_empty() {
-                                                                    let display_lines = if lines.len() > 25 {
-                                                                        let mut truncated = lines[..20].to_vec();
-                                                                        truncated.push(format!("... ({} more lines)", lines.len() - 20));
-                                                                        truncated
-                                                                    } else {
-                                                                        lines
-                                                                    };
-                                                                    app.add_entry(Entry {
-                                                                        entry_type: EntryType::Output,
-                                                                        content: display_lines,
-                                                                        cwd: String::new(),
-                                                                    });
-                                                                }
-                                                            }
-                                                            AgentUpdate::ToolFinished { tool: _, summary } => {
-                                                                if !summary.is_empty() {
-                                                                    app.add_entry(Entry {
-                                                                        entry_type: EntryType::Output,
-                                                                        content: vec![summary],
-                                                                        cwd: String::new(),
-                                                                    });
-                                                                }
-                                                            }
-                                                            AgentUpdate::Completed { final_answer, tool_output_lines: _ } => {
-                                                                app.ai_loading = None;
-                                                                if let Some(ans) = final_answer {
-                                                                    let clean = ans.trim();
-                                                                    let lower = clean.to_lowercase();
-                                                                    if !clean.is_empty()
-                                                                        && lower != "done"
-                                                                        && lower != "done."
-                                                                        && !lower.starts_with("done")
-                                                                        && !clean.starts_with("TOOL:")
-                                                                    {
-                                                                        app.add_entry(Entry {
-                                                                            entry_type: EntryType::Output,
-                                                                            content: clean.lines().map(|s| s.to_string()).collect(),
-                                                                            cwd: String::new(),
-                                                                        });
-                                                                    }
-                                                                }
-                                                                task_completed = true;
-                                                                break;
-                                                            }
-                                                            AgentUpdate::Error(err_msg) => {
-                                                                app.ai_loading = None;
-                                                                app.add_entry(Entry {
-                                                                    entry_type: EntryType::System,
-                                                                    content: vec![format!("AI error: {}", err_msg)],
-                                                                    cwd: String::new(),
-                                                                });
-                                                                task_completed = true;
-                                                                break;
-                                                            }
+                                                            app.add_entry(Entry {
+                                                                entry_type: EntryType::System,
+                                                                content: vec![
+                                                                    "──────────────────────────────────────────────────────────────────────".to_string(),
+                                                                    "Plan generated (Iteration 1). Saved to plan.md.".to_string(),
+                                                                    "Actions:".to_string(),
+                                                                    "  • 'approve' - Execute this plan with autonomous builder".to_string(),
+                                                                    "  • 'deny'    - Cancel and discard plan".to_string(),
+                                                                    "  • Type any suggestion or feedback to refine the plan".to_string(),
+                                                                    "──────────────────────────────────────────────────────────────────────".to_string(),
+                                                                ],
+                                                                cwd: String::new(),
+                                                            });
                                                         }
                                                     }
-
-                                                    if task_completed {
-                                                        break;
-                                                    }
-
-                                                    render(&mut terminal, &mut app)?;
-
-                                                    let mut user_cancelled = false;
-                                                    while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-                                                        if let Ok(Event::Key(key)) = event::read() {
-                                                            if key.code == KeyCode::Esc
-                                                                || (key.code == KeyCode::Char('c')
-                                                                    && key.modifiers.contains(KeyModifiers::CONTROL))
-                                                            {
-                                                                user_cancelled = true;
-                                                                break;
-                                                            }
-                                                        }
-                                                    }
-
-                                                    if user_cancelled {
-                                                        cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
-                                                        app.ai_loading = None;
-                                                        app.add_entry(Entry {
-                                                            entry_type: EntryType::System,
-                                                            content: vec!["^C [Process stopped by Esc]".to_string()],
-                                                            cwd: String::new(),
-                                                        });
-                                                        break;
-                                                    }
-
-                                                    std::thread::sleep(std::time::Duration::from_millis(50));
                                                 }
                                             } else {
                                                 if nsh::command_needs_sudo_password(&input) {

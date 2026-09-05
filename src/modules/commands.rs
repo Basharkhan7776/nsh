@@ -156,7 +156,37 @@ pub fn has_unquoted_shell_metachars(input: &str) -> bool {
     false
 }
 
-/// Check if a command is interactive and requires direct terminal TTY access (editors, TUIs, pagers, REPLs).
+/// Clean interactive input by removing explicit execution prefixes (e.g. "live", "dev", "tui", "term", "interactive").
+pub fn clean_interactive_input(input: &str) -> String {
+    let trimmed = input.trim();
+    let tokens = parse_command_line(trimmed);
+    if tokens.is_empty() {
+        return trimmed.to_string();
+    }
+    // Check if first token is an explicit prefix
+    if matches!(
+        tokens[0].as_str(),
+        "live" | "dev" | "tui" | "term" | "interactive"
+    ) {
+        if let Some(rest) = trimmed.strip_prefix(&tokens[0]) {
+            return rest.trim_start().to_string();
+        }
+    }
+    // Check if sudo/doas is followed by an explicit prefix (e.g. "sudo live apt update" -> "sudo apt update")
+    if (tokens[0] == "sudo" || tokens[0] == "doas") && tokens.len() > 1 {
+        if matches!(
+            tokens[1].as_str(),
+            "live" | "dev" | "tui" | "term" | "interactive"
+        ) {
+            let mut rebuilt = vec![tokens[0].clone()];
+            rebuilt.extend(tokens.iter().skip(2).cloned());
+            return rebuilt.join(" ");
+        }
+    }
+    trimmed.to_string()
+}
+
+/// Check if a command is interactive or requires direct terminal TTY access (editors, TUIs, pagers, REPLs, dev servers, live network/package commands).
 pub fn is_interactive_command(input: &str) -> bool {
     let input = input.trim();
     if input.is_empty() {
@@ -168,8 +198,11 @@ pub fn is_interactive_command(input: &str) -> bool {
         return false;
     }
 
-    // Explicit user prefixes for any external TUI or interactive binary: "tui ...", "term ...", "interactive ..."
-    if matches!(tokens[0].as_str(), "tui" | "term" | "interactive") {
+    // Explicit user prefixes: "live ...", "dev ...", "tui ...", "term ...", "interactive ..."
+    if matches!(
+        tokens[0].as_str(),
+        "live" | "dev" | "tui" | "term" | "interactive"
+    ) {
         return true;
     }
 
@@ -199,6 +232,14 @@ pub fn is_interactive_command(input: &str) -> bool {
 
     if cmd_tokens.is_empty() {
         return false;
+    }
+
+    // Check if prefix was passed after sudo (e.g. "sudo live apt update")
+    if matches!(
+        cmd_tokens[0].as_str(),
+        "live" | "dev" | "tui" | "term" | "interactive"
+    ) {
+        return true;
     }
 
     let raw_program = &cmd_tokens[0];
@@ -246,12 +287,14 @@ pub fn is_interactive_command(input: &str) -> bool {
             | "viddy"
             | "ctop"
             | "bashtop"
+            | "bpytop"
+            | "zenith"
     ) {
         return true;
     }
 
     // 3. Pagers / manual pages
-    if matches!(program, "less" | "more" | "man" | "pager" | "info") {
+    if matches!(program, "less" | "more" | "man" | "pager" | "info" | "most") {
         return true;
     }
 
@@ -278,6 +321,20 @@ pub fn is_interactive_command(input: &str) -> bool {
     if program == "git" {
         if let Some(sub) = args.first() {
             match *sub {
+                // Network / transfer commands (require live uploading/downloading progress meters and credential prompts)
+                "push" | "pull" | "clone" | "fetch" => {
+                    return true;
+                }
+                "remote" => {
+                    if args.iter().any(|a| matches!(*a, "update" | "prune")) {
+                        return true;
+                    }
+                }
+                // Pagers & diff inspections (open pager or colored diff viewer)
+                "log" | "diff" | "show" | "blame" | "reflog" | "whatchanged" => {
+                    return true;
+                }
+                // Commits: interactive editor unless message is provided via flags
                 "commit" => {
                     let has_m = args.iter().any(|a| {
                         *a == "-m"
@@ -288,18 +345,30 @@ pub fn is_interactive_command(input: &str) -> bool {
                             || *a == "-C"
                             || *a == "-c"
                     });
-                    if !has_m {
+                    let is_patch = args.iter().any(|a| {
+                        *a == "-p" || *a == "--patch" || *a == "-i" || *a == "--interactive"
+                    });
+                    if !has_m || is_patch {
                         return true;
                     }
                 }
-                "rebase" => {
-                    if args.iter().any(|a| *a == "-i" || *a == "--interactive") {
-                        return true;
-                    }
+                // Rebase, merge, cherry-pick, revert, bisect
+                "rebase" | "merge" | "cherry-pick" | "revert" | "bisect" => {
+                    return true;
                 }
-                "add" | "checkout" | "reset" | "stash" => {
+                // Interactive patch or checkout/reset/stash/restore/switch
+                "add" | "checkout" | "reset" | "restore" | "switch" => {
                     if args.iter().any(|a| {
                         *a == "-p" || *a == "--patch" || *a == "-i" || *a == "--interactive"
+                    }) {
+                        return true;
+                    }
+                }
+                "stash" => {
+                    if args.iter().any(|a| {
+                        matches!(*a, "pop" | "apply" | "drop" | "show" | "branch")
+                            || *a == "-p"
+                            || *a == "--patch"
                     }) {
                         return true;
                     }
@@ -309,7 +378,175 @@ pub fn is_interactive_command(input: &str) -> bool {
         }
     }
 
-    // 6. Multiplexers & remote shells
+    // 6. Dev servers, Bundlers, and Watchers (HMR, live servers, continuous processes)
+    if matches!(
+        program,
+        "next"
+            | "vite"
+            | "nuxt"
+            | "astro"
+            | "remix"
+            | "webpack"
+            | "rollup"
+            | "esbuild"
+            | "parcel"
+            | "turbo"
+            | "turbopack"
+            | "nodemon"
+            | "live-server"
+            | "http-server"
+            | "serve"
+            | "wrangler"
+            | "flask"
+            | "uvicorn"
+            | "gunicorn"
+            | "fastapi"
+            | "rails"
+            | "caddy"
+            | "ngrok"
+            | "cloudflared"
+            | "localtunnel"
+    ) {
+        return true;
+    }
+
+    if program == "manage.py" && args.iter().any(|a| *a == "runserver") {
+        return true;
+    }
+
+    // 7. Node / JS / TS Package Managers & Script Runners
+    if matches!(program, "npm" | "pnpm" | "yarn" | "bun") {
+        // Dev server / watch / start runs: e.g. "npm run dev", "pnpm dev", "yarn start", "bun dev"
+        if args.iter().any(|a| matches!(*a, "dev" | "start" | "watch" | "serve" | "live" | "run-p")) {
+            return true;
+        }
+        // Package installations / updates / interactive initializers
+        if let Some(first_arg) = args.iter().find(|a| !a.starts_with('-')) {
+            if matches!(
+                *first_arg,
+                "install"
+                    | "i"
+                    | "add"
+                    | "update"
+                    | "upgrade"
+                    | "remove"
+                    | "rm"
+                    | "uninstall"
+                    | "audit"
+                    | "create"
+                    | "init"
+                    | "publish"
+                    | "login"
+            ) {
+                return true;
+            }
+        }
+        if args.iter().any(|a| *a == "-w" || *a == "--watch") {
+            return true;
+        }
+    }
+
+    if matches!(program, "npx" | "pnpx" | "bunx") {
+        return true;
+    }
+
+    // 8. System Package Managers & Build/Run Tools (live progress bars, [Y/n] prompts)
+    if matches!(
+        program,
+        "apt"
+            | "apt-get"
+            | "dpkg"
+            | "aptitude"
+            | "pacman"
+            | "yay"
+            | "paru"
+            | "dnf"
+            | "yum"
+            | "rpm"
+            | "zypper"
+            | "apk"
+            | "brew"
+            | "snap"
+            | "flatpak"
+    ) {
+        return true;
+    }
+
+    if matches!(program, "pip" | "pip3" | "conda" | "mamba") {
+        if args.iter().any(|a| matches!(*a, "install" | "uninstall" | "download" | "upgrade")) {
+            return true;
+        }
+    }
+
+    if program == "cargo" && args.iter().any(|a| matches!(*a, "run" | "watch" | "install" | "binstall")) {
+        return true;
+    }
+
+    if program == "go" && args.iter().any(|a| *a == "run") {
+        return true;
+    }
+
+    if program == "dotnet" && args.iter().any(|a| *a == "run" || *a == "watch") {
+        return true;
+    }
+
+    // 9. Continuous Streaming & Diagnostics
+    if matches!(
+        program,
+        "ping"
+            | "traceroute"
+            | "tracepath"
+            | "mtr"
+            | "watch"
+            | "tcpdump"
+            | "tshark"
+            | "wireshark"
+    ) {
+        return true;
+    }
+
+    if program == "tail" && args.iter().any(|a| *a == "-f" || *a == "-F" || *a == "--follow") {
+        return true;
+    }
+
+    if program == "journalctl" && (args.is_empty() || args.iter().any(|a| *a == "-f" || *a == "--follow")) {
+        return true;
+    }
+
+    if program == "dmesg" && args.iter().any(|a| *a == "-w" || *a == "--follow") {
+        return true;
+    }
+
+    if matches!(program, "docker" | "podman") {
+        if args.iter().any(|a| {
+            matches!(*a, "attach" | "compose" | "stats")
+                || *a == "-it"
+                || *a == "-ti"
+                || *a == "-f"
+                || *a == "--follow"
+        }) {
+            return true;
+        }
+        if let Some(sub) = args.first() {
+            if matches!(*sub, "compose") {
+                return true;
+            }
+        }
+    }
+
+    if program == "kubectl" {
+        if args.iter().any(|a| {
+            matches!(*a, "exec" | "port-forward" | "attach")
+                || *a == "-it"
+                || *a == "-ti"
+                || *a == "-f"
+                || *a == "--follow"
+        }) {
+            return true;
+        }
+    }
+
+    // 10. Multiplexers & remote shells
     if matches!(
         program,
         "tmux"
@@ -327,7 +564,7 @@ pub fn is_interactive_command(input: &str) -> bool {
         return true;
     }
 
-    // 7. Interactive Debuggers & database / REPL shells
+    // 11. Interactive Debuggers & database / REPL shells
     if matches!(
         program,
         "gdb"
@@ -345,7 +582,7 @@ pub fn is_interactive_command(input: &str) -> bool {
         return true;
     }
 
-    // 8. Shells & general REPLs when invoked interactively (without a script file or -c)
+    // 12. Shells & general REPLs when invoked interactively (without a script file or -c)
     if matches!(
         program,
         "bash" | "zsh" | "fish" | "sh" | "csh" | "tcsh" | "dash" | "ksh"
@@ -365,9 +602,12 @@ pub fn is_interactive_command(input: &str) -> bool {
         if is_repl && !has_script_file {
             return true;
         }
+        if args.iter().any(|a| *a == "http.server" || *a == "runserver") {
+            return true;
+        }
     }
 
-    // 9. Interactive authentication prompts
+    // 13. Interactive authentication prompts
     if matches!(program, "passwd" | "su") {
         return true;
     }
@@ -377,21 +617,11 @@ pub fn is_interactive_command(input: &str) -> bool {
 
 /// Execute an interactive command with direct terminal I/O (inherited stdin, stdout, stderr).
 pub fn execute_interactive_command(input: &str) -> Result<std::process::ExitStatus, String> {
-    let input = input.trim();
-    if input.is_empty() {
+    let clean_str = clean_interactive_input(input);
+    let clean_input = clean_str.trim();
+    if clean_input.is_empty() {
         return Err("Empty command".to_string());
     }
-
-    // Strip explicit prefixes like "tui " or "term " or "interactive "
-    let clean_input = if let Some(rest) = input.strip_prefix("tui ") {
-        rest.trim()
-    } else if let Some(rest) = input.strip_prefix("term ") {
-        rest.trim()
-    } else if let Some(rest) = input.strip_prefix("interactive ") {
-        rest.trim()
-    } else {
-        input
-    };
 
     let tokens = parse_command_line(clean_input);
     if tokens.is_empty() {
@@ -522,6 +752,25 @@ pub fn execute_command(input: &str) -> Vec<String> {
                 }
             };
 
+            let mut stdout = child.stdout.take();
+            let mut stderr = child.stderr.take();
+
+            let stdout_reader = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = stdout.take() {
+                    let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+                }
+                buf
+            });
+
+            let stderr_reader = std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut r) = stderr.take() {
+                    let _ = std::io::Read::read_to_end(&mut r, &mut buf);
+                }
+                buf
+            });
+
             let mut user_cancelled = false;
             loop {
                 match child.try_wait() {
@@ -546,14 +795,20 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
             if user_cancelled {
                 let _ = child.wait();
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
                 return vec!["^C [Process stopped by Esc]".to_string()];
             }
 
-            match child.wait_with_output() {
-                Ok(output) => {
+            let wait_res = child.wait();
+            let stdout_bytes = stdout_reader.join().unwrap_or_default();
+            let stderr_bytes = stderr_reader.join().unwrap_or_default();
+
+            match wait_res {
+                Ok(status) => {
                     let mut lines = Vec::new();
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stdout = String::from_utf8_lossy(&stdout_bytes);
+                    let stderr = String::from_utf8_lossy(&stderr_bytes);
 
                     lines.extend(normalize_output_lines(&stdout));
                     let err_lines = normalize_output_lines(&stderr);
@@ -561,8 +816,8 @@ pub fn execute_command(input: &str) -> Vec<String> {
                         lines.extend(err_lines);
                     }
 
-                    if lines.is_empty() && !output.status.success() {
-                        if let Some(code) = output.status.code() {
+                    if lines.is_empty() && !status.success() {
+                        if let Some(code) = status.code() {
                             lines.push(format!("{}: exited with status {}", program, code));
                         }
                     }
@@ -776,17 +1031,89 @@ mod tests {
         assert!(is_interactive_command("tui ./my_custom_app"));
         assert!(is_interactive_command("term cargo run"));
 
-        // Git interactive commands
+        // Git network & interactive commands
+        assert!(is_interactive_command("git push"));
+        assert!(is_interactive_command("git push origin main"));
+        assert!(is_interactive_command("git pull"));
+        assert!(is_interactive_command("git pull --rebase"));
+        assert!(is_interactive_command("git fetch"));
+        assert!(is_interactive_command("git clone https://github.com/user/repo"));
+        assert!(is_interactive_command("git log"));
+        assert!(is_interactive_command("git diff"));
         assert!(is_interactive_command("git commit"));
         assert!(!is_interactive_command("git commit -m \"initial commit\""));
         assert!(is_interactive_command("git rebase -i HEAD~3"));
         assert!(is_interactive_command("git add -p"));
+        assert!(is_interactive_command("git stash pop"));
 
-        // Non-interactive commands
+        // Dev servers & watchers
+        assert!(is_interactive_command("vite"));
+        assert!(is_interactive_command("vite dev"));
+        assert!(is_interactive_command("next dev"));
+        assert!(is_interactive_command("next start"));
+        assert!(is_interactive_command("nuxt dev"));
+        assert!(is_interactive_command("astro dev"));
+        assert!(is_interactive_command("remix dev"));
+        assert!(is_interactive_command("nodemon index.js"));
+        assert!(is_interactive_command("python -m http.server 8000"));
+        assert!(is_interactive_command("python manage.py runserver"));
+
+        // JS/TS package managers & runners
+        assert!(is_interactive_command("npm run dev"));
+        assert!(is_interactive_command("npm start"));
+        assert!(is_interactive_command("npm run watch"));
+        assert!(is_interactive_command("npm install"));
+        assert!(is_interactive_command("npm i lodash"));
+        assert!(is_interactive_command("pnpm dev"));
+        assert!(is_interactive_command("pnpm add react"));
+        assert!(is_interactive_command("yarn dev"));
+        assert!(is_interactive_command("bun dev"));
+        assert!(is_interactive_command("npx create-next-app"));
+
+        // System package managers & runners
+        assert!(is_interactive_command("apt install ripgrep"));
+        assert!(is_interactive_command("sudo apt install ripgrep"));
+        assert!(is_interactive_command("sudo apt-get update"));
+        assert!(is_interactive_command("pacman -Syu"));
+        assert!(is_interactive_command("cargo run"));
+        assert!(is_interactive_command("cargo watch -x check"));
+        assert!(is_interactive_command("pip install requests"));
+
+        // Continuous streaming & diagnostics
+        assert!(is_interactive_command("ping 8.8.8.8"));
+        assert!(is_interactive_command("tail -f app.log"));
+        assert!(is_interactive_command("journalctl -f"));
+
+        // Explicit prefixes
+        assert!(is_interactive_command("live curl -sSL https://example.com"));
+        assert!(is_interactive_command("dev ./server"));
+        assert!(is_interactive_command("sudo live apt update"));
+
+        // Non-interactive commands (remain captured in TUI output history)
         assert!(!is_interactive_command("ls -la"));
         assert!(!is_interactive_command("cat Cargo.toml"));
         assert!(!is_interactive_command("git status"));
         assert!(!is_interactive_command("cargo test"));
+        assert!(!is_interactive_command("cargo check"));
         assert!(!is_interactive_command("echo hello world"));
+    }
+
+    #[test]
+    fn test_clean_interactive_input() {
+        assert_eq!(clean_interactive_input("live git push"), "git push");
+        assert_eq!(clean_interactive_input("dev vite"), "vite");
+        assert_eq!(clean_interactive_input("tui nvim"), "nvim");
+        assert_eq!(clean_interactive_input("term ./app"), "./app");
+        assert_eq!(clean_interactive_input("sudo live apt update"), "sudo apt update");
+        assert_eq!(clean_interactive_input("git push origin main"), "git push origin main");
+    }
+
+    #[test]
+    fn test_execute_command_large_output_no_deadlock() {
+        // Output > 64KB (e.g. 100KB) tests that pipe buffers do not deadlock when drained asynchronously
+        let output = execute_command("python3 -c \"print('X' * 100000)\"");
+        assert!(!output.is_empty());
+        let total_len: usize = output.iter().map(|s| s.len()).sum();
+        assert!(total_len >= 100000);
     }
 }

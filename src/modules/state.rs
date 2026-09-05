@@ -157,6 +157,13 @@ pub enum SudoPromptMode {
     Auto,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanSession {
+    pub goal: String,
+    pub current_plan: String,
+    pub iteration: usize,
+}
+
 // Application state
 pub struct App {
     pub entries: Vec<Entry>,                        // All history entries (screen rows)
@@ -189,6 +196,7 @@ pub struct App {
     pub sudo_error: Option<String>,                 // Sudo auth error message
     pub sudo_prompt_mode: SudoPromptMode,           // Sudo prompt type (TuiModal / DesktopGui / Auto)
     pub input_scroll_x: usize,                      // Horizontal scroll offset for input
+    pub active_plan_session: Option<PlanSession>,   // Active interactive plan review session
 }
 
 impl App {
@@ -225,7 +233,13 @@ impl App {
             sudo_error: None,
             sudo_prompt_mode: SudoPromptMode::default(),
             input_scroll_x: 0,
+            active_plan_session: None,
         }
+    }
+
+    // Clear active plan session
+    pub fn clear_plan_session(&mut self) {
+        self.active_plan_session = None;
     }
 
     // Securely wipe and reset sudo password state
