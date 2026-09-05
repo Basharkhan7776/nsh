@@ -197,6 +197,10 @@ pub struct App {
     pub sudo_prompt_mode: SudoPromptMode,           // Sudo prompt type (TuiModal / DesktopGui / Auto)
     pub input_scroll_x: usize,                      // Horizontal scroll offset for input
     pub active_plan_session: Option<PlanSession>,   // Active interactive plan review session
+    pub show_history_modal: bool,                   // Command history dialog modal is active
+    pub history_modal_selected: usize,             // Currently selected history command index
+    pub history_modal_scroll: usize,               // Scroll offset for history modal list
+    pub history_modal_filter: String,              // Search filter for history dialog
 }
 
 impl App {
@@ -234,6 +238,10 @@ impl App {
             sudo_prompt_mode: SudoPromptMode::default(),
             input_scroll_x: 0,
             active_plan_session: None,
+            show_history_modal: false,
+            history_modal_selected: 0,
+            history_modal_scroll: 0,
+            history_modal_filter: String::new(),
         }
     }
 
@@ -254,6 +262,107 @@ impl App {
         self.show_sudo_prompt = false;
         self.pending_sudo_command = None;
         self.sudo_error = None;
+    }
+
+    // Open command history dialog modal
+    pub fn open_history_modal(&mut self) {
+        self.show_history_modal = true;
+        self.history_modal_filter.clear();
+        self.history_modal_scroll = 0;
+        let cmds = self.filtered_history_commands();
+        if !cmds.is_empty() {
+            // Highlight the latest command by default
+            self.history_modal_selected = cmds.len().saturating_sub(1);
+            self.current_input = cmds[self.history_modal_selected].clone();
+            self.cursor_position = self.current_input.len();
+            self.input_scroll_x = 0;
+        } else {
+            self.history_modal_selected = 0;
+            self.current_input.clear();
+            self.cursor_position = 0;
+            self.input_scroll_x = 0;
+        }
+    }
+
+    // Close command history dialog modal
+    pub fn close_history_modal(&mut self) {
+        self.show_history_modal = false;
+        self.history_modal_filter.clear();
+    }
+
+    // Get list of commands matching current filter (ignoring bare "history" command)
+    pub fn filtered_history_commands(&self) -> Vec<String> {
+        let filter = self.history_modal_filter.trim().to_lowercase();
+        self.command_history
+            .iter()
+            .filter(|cmd| {
+                let trimmed = cmd.trim();
+                if trimmed.eq_ignore_ascii_case("history") || trimmed.eq_ignore_ascii_case("/history") {
+                    return false;
+                }
+                if filter.is_empty() {
+                    true
+                } else {
+                    trimmed.to_lowercase().contains(&filter)
+                }
+            })
+            .cloned()
+            .collect()
+    }
+
+    // Move selection up in history modal (earlier command)
+    pub fn history_modal_select_up(&mut self) {
+        let cmds = self.filtered_history_commands();
+        if cmds.is_empty() {
+            return;
+        }
+        if self.history_modal_selected > 0 {
+            self.history_modal_selected -= 1;
+        }
+        if let Some(cmd) = cmds.get(self.history_modal_selected) {
+            self.current_input = cmd.clone();
+            self.cursor_position = self.current_input.len();
+            self.input_scroll_x = 0;
+        }
+    }
+
+    // Move selection down in history modal (later command)
+    pub fn history_modal_select_down(&mut self) {
+        let cmds = self.filtered_history_commands();
+        if cmds.is_empty() {
+            return;
+        }
+        if self.history_modal_selected + 1 < cmds.len() {
+            self.history_modal_selected += 1;
+        }
+        if let Some(cmd) = cmds.get(self.history_modal_selected) {
+            self.current_input = cmd.clone();
+            self.cursor_position = self.current_input.len();
+            self.input_scroll_x = 0;
+        }
+    }
+
+    // Confirm selection from history modal and close it
+    pub fn history_modal_confirm(&mut self) {
+        let cmds = self.filtered_history_commands();
+        if let Some(cmd) = cmds.get(self.history_modal_selected) {
+            self.current_input = cmd.clone();
+            self.cursor_position = self.current_input.len();
+            self.input_scroll_x = 0;
+        }
+        self.close_history_modal();
+    }
+
+    // Ensure the selected item is visible within the available height
+    pub fn history_modal_adjust_scroll(&mut self, visible_height: usize) {
+        if visible_height == 0 {
+            return;
+        }
+        if self.history_modal_selected < self.history_modal_scroll {
+            self.history_modal_scroll = self.history_modal_selected;
+        } else if self.history_modal_selected >= self.history_modal_scroll + visible_height {
+            self.history_modal_scroll = self.history_modal_selected + 1 - visible_height;
+        }
     }
 
     // Load command history from local persistent storage
@@ -699,5 +808,54 @@ mod tests {
             app.entries[0].content,
             vec!["Writing: 100%".to_string(), "Done".to_string()]
         );
+    }
+
+    #[test]
+    fn test_history_modal_lifecycle() {
+        let mut app = App::new();
+        app.add_command_history("git status");
+        app.add_command_history("cargo build");
+        app.add_command_history("npm test");
+
+        // Open modal
+        app.open_history_modal();
+        assert!(app.show_history_modal);
+
+        let cmds = app.filtered_history_commands();
+        assert_eq!(cmds, vec!["git status", "cargo build", "npm test"]);
+
+        // Default selection is the most recent command (npm test)
+        assert_eq!(app.history_modal_selected, 2);
+        assert_eq!(app.current_input, "npm test");
+
+        // Navigate up (to cargo build)
+        app.history_modal_select_up();
+        assert_eq!(app.history_modal_selected, 1);
+        assert_eq!(app.current_input, "cargo build");
+
+        // Navigate up (to git status)
+        app.history_modal_select_up();
+        assert_eq!(app.history_modal_selected, 0);
+        assert_eq!(app.current_input, "git status");
+
+        // Navigate up at top boundary stays at 0
+        app.history_modal_select_up();
+        assert_eq!(app.history_modal_selected, 0);
+
+        // Navigate down (back to cargo build)
+        app.history_modal_select_down();
+        assert_eq!(app.history_modal_selected, 1);
+        assert_eq!(app.current_input, "cargo build");
+
+        // Filtering
+        app.history_modal_filter = "git".to_string();
+        let filtered = app.filtered_history_commands();
+        assert_eq!(filtered, vec!["git status"]);
+
+        // Confirm selection: closes modal and leaves command in input
+        app.history_modal_selected = 0;
+        app.history_modal_confirm();
+        assert!(!app.show_history_modal);
+        assert_eq!(app.current_input, "git status");
     }
 }

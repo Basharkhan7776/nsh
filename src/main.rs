@@ -205,6 +205,10 @@ fn run_live_command_in_ui(
             }
             return Ok(());
         }
+        "/history" | "history" => {
+            app.open_history_modal();
+            return Ok(());
+        }
         _ => {}
     }
 
@@ -653,6 +657,12 @@ fn main() -> std::io::Result<()> {
                                     break;
                                 }
 
+                                // Handle history modal mode
+                                if app.show_history_modal {
+                                    handle_history_modal_input(&mut app, key.code, key.modifiers);
+                                    break;
+                                }
+
                                 let (key_code, modifiers) =
                                     resolve_key_with_alt_meta(key.code, key.modifiers);
                                 let action = get_action(key_code, modifiers);
@@ -915,6 +925,19 @@ fn main() -> std::io::Result<()> {
                                         if input == "exit" || input == "quit" {
                                             running = false;
                                         } else if !input.is_empty() {
+                                            let trimmed = input.trim();
+                                            if trimmed.eq_ignore_ascii_case("history") || trimmed.eq_ignore_ascii_case("/history") {
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                                app.saved_input.clear();
+                                                app.history_index = None;
+                                                app.show_suggestions = false;
+                                                app.current_suggestions.clear();
+                                                app.open_history_modal();
+                                                continue;
+                                            }
+
                                             app.add_entry(Entry {
                                                 entry_type: EntryType::Command,
                                                 content: vec![input.clone()],
@@ -1207,6 +1230,55 @@ fn main() -> std::io::Result<()> {
 
                             // Mouse input handling
                             Event::Mouse(mouse) => {
+                                // History modal mode: click or scroll
+                                if app.show_history_modal {
+                                    let screen_size = terminal.size().unwrap_or_default();
+                                    let screen_area = ratatui::layout::Rect::new(0, 0, screen_size.width, screen_size.height);
+                                    let modal = nsh::compute_history_modal_area(screen_area);
+
+                                    match mouse.kind {
+                                        MouseEventKind::Down(MouseButton::Left) => {
+                                            if mouse.column < modal.x
+                                                || mouse.column >= modal.x + modal.width
+                                                || mouse.row < modal.y
+                                                || mouse.row >= modal.y + modal.height
+                                            {
+                                                app.close_history_modal();
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                            } else if mouse.row == modal.y
+                                                && mouse.column >= modal.x + modal.width.saturating_sub(14)
+                                            {
+                                                app.close_history_modal();
+                                                app.current_input.clear();
+                                                app.cursor_position = 0;
+                                                app.input_scroll_x = 0;
+                                            } else {
+                                                let list_y = modal.y + 3;
+                                                let list_h = modal.height.saturating_sub(4) as usize;
+                                                if mouse.row >= list_y && mouse.row < list_y + list_h as u16 {
+                                                    let clicked = (mouse.row - list_y) as usize;
+                                                    let target = app.history_modal_scroll + clicked;
+                                                    let cmds = app.filtered_history_commands();
+                                                    if target < cmds.len() {
+                                                        app.history_modal_selected = target;
+                                                        app.history_modal_confirm();
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        MouseEventKind::ScrollUp => {
+                                            app.history_modal_select_up();
+                                        }
+                                        MouseEventKind::ScrollDown => {
+                                            app.history_modal_select_down();
+                                        }
+                                        _ => {}
+                                    }
+                                    break;
+                                }
+
                                 // Settings mode: left click inside or outside modal
                                 if app.show_settings
                                     && mouse.kind == MouseEventKind::Down(MouseButton::Left)
@@ -1647,6 +1719,115 @@ fn settings_handle_enter(app: &mut App) {
             app.settings_state.enabled = app.settings_cursor == 0;
             app.settings_pop();
         }
+    }
+}
+
+fn handle_history_modal_input(
+    app: &mut App,
+    key_code: crossterm::event::KeyCode,
+    modifiers: crossterm::event::KeyModifiers,
+) {
+    use crossterm::event::KeyCode;
+
+    let ctrl = modifiers.contains(crossterm::event::KeyModifiers::CONTROL);
+
+    match key_code {
+        KeyCode::Esc => {
+            app.close_history_modal();
+            app.current_input.clear();
+            app.cursor_position = 0;
+            app.input_scroll_x = 0;
+        }
+        KeyCode::Char('c') if ctrl => {
+            app.close_history_modal();
+            app.current_input.clear();
+            app.cursor_position = 0;
+            app.input_scroll_x = 0;
+        }
+        KeyCode::Up => {
+            app.history_modal_select_up();
+        }
+        KeyCode::Down => {
+            app.history_modal_select_down();
+        }
+        KeyCode::PageUp => {
+            for _ in 0..5 {
+                app.history_modal_select_up();
+            }
+        }
+        KeyCode::PageDown => {
+            for _ in 0..5 {
+                app.history_modal_select_down();
+            }
+        }
+        KeyCode::Home => {
+            let cmds = app.filtered_history_commands();
+            if !cmds.is_empty() {
+                app.history_modal_selected = 0;
+                if let Some(cmd) = cmds.first() {
+                    app.current_input = cmd.clone();
+                    app.cursor_position = app.current_input.len();
+                    app.input_scroll_x = 0;
+                }
+            }
+        }
+        KeyCode::End => {
+            let cmds = app.filtered_history_commands();
+            if !cmds.is_empty() {
+                app.history_modal_selected = cmds.len() - 1;
+                if let Some(cmd) = cmds.last() {
+                    app.current_input = cmd.clone();
+                    app.cursor_position = app.current_input.len();
+                    app.input_scroll_x = 0;
+                }
+            }
+        }
+        KeyCode::Enter | KeyCode::Tab | KeyCode::Right => {
+            app.history_modal_confirm();
+        }
+        KeyCode::Backspace => {
+            if !app.history_modal_filter.is_empty() {
+                app.history_modal_filter.pop();
+                let cmds = app.filtered_history_commands();
+                if !cmds.is_empty() {
+                    if app.history_modal_selected >= cmds.len() {
+                        app.history_modal_selected = cmds.len() - 1;
+                    }
+                    if let Some(cmd) = cmds.get(app.history_modal_selected) {
+                        app.current_input = cmd.clone();
+                        app.cursor_position = app.current_input.len();
+                        app.input_scroll_x = 0;
+                    }
+                }
+            }
+        }
+        KeyCode::Char('u') if ctrl => {
+            app.history_modal_filter.clear();
+            let cmds = app.filtered_history_commands();
+            if !cmds.is_empty() {
+                app.history_modal_selected = cmds.len().saturating_sub(1);
+                if let Some(cmd) = cmds.get(app.history_modal_selected) {
+                    app.current_input = cmd.clone();
+                    app.cursor_position = app.current_input.len();
+                    app.input_scroll_x = 0;
+                }
+            }
+        }
+        KeyCode::Char(c) => {
+            if !ctrl && !modifiers.contains(crossterm::event::KeyModifiers::ALT) {
+                app.history_modal_filter.push(c);
+                let cmds = app.filtered_history_commands();
+                if !cmds.is_empty() {
+                    app.history_modal_selected = cmds.len().saturating_sub(1);
+                    if let Some(cmd) = cmds.get(app.history_modal_selected) {
+                        app.current_input = cmd.clone();
+                        app.cursor_position = app.current_input.len();
+                        app.input_scroll_x = 0;
+                    }
+                }
+            }
+        }
+        _ => {}
     }
 }
 

@@ -33,6 +33,7 @@ pub const BUILTIN_COMMANDS: &[&str] = &[
     "index", "/index",
     "/settings", "settings",
     "/help", "help",
+    "history", "/history",
     "cd", "clear", "exit", "quit",
 ];
 

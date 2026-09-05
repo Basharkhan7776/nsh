@@ -1019,3 +1019,62 @@ async fn scenario_12_execute_command_and_tool_integration() {
     let res_val = exec_res.unwrap();
     assert!(res_val["output"].as_str().unwrap().contains("tool_pipeline_ok"));
 }
+
+// -----------------------------------------------------------------------------
+// Scenario 13: History Modal Workflow (Commands, Navigation, Input Entry)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn scenario_13_history_modal_workflow() {
+    // 1. Built-in command triggers
+    let res_bare = execute_command("history");
+    assert_eq!(res_bare, vec!["__HISTORY__".to_string()]);
+
+    let res_slash = execute_command("/history");
+    assert_eq!(res_slash, vec!["__HISTORY__".to_string()]);
+
+    // 2. State & modal lifecycle
+    let mut app = App::new();
+    assert!(!app.show_history_modal);
+
+    // Populate chronological command history
+    app.command_history = vec![
+        "ls -la".to_string(),
+        "cargo check".to_string(),
+        "git status".to_string(),
+    ];
+
+    // Open history modal
+    app.open_history_modal();
+    assert!(app.show_history_modal);
+    // Selected should default to the most recent command ("git status")
+    assert_eq!(app.history_modal_selected, 2);
+    // Crucial requirement: Selecting enters into current_input
+    assert_eq!(app.current_input, "git status");
+
+    // Navigate Up with arrow key
+    app.history_modal_select_up();
+    assert_eq!(app.history_modal_selected, 1);
+    assert_eq!(app.current_input, "cargo check");
+
+    // Navigate Up again
+    app.history_modal_select_up();
+    assert_eq!(app.history_modal_selected, 0);
+    assert_eq!(app.current_input, "ls -la");
+
+    // Navigate Down with arrow key
+    app.history_modal_select_down();
+    assert_eq!(app.history_modal_selected, 1);
+    assert_eq!(app.current_input, "cargo check");
+
+    // Test filter capability
+    app.history_modal_filter = "git".to_string();
+    let filtered = app.filtered_history_commands();
+    assert_eq!(filtered, vec!["git status".to_string()]);
+
+    // Confirm selection (e.g. Enter key)
+    app.history_modal_selected = 0;
+    app.history_modal_confirm();
+    assert!(!app.show_history_modal);
+    assert_eq!(app.current_input, "git status");
+}

@@ -27,6 +27,8 @@ pub fn render(
             render_shell(f, app);
             if app.show_sudo_prompt {
                 render_sudo_password_modal(f, app);
+            } else if app.show_history_modal {
+                render_history_modal(f, app);
             }
         }
     })?;
@@ -485,8 +487,12 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
-    // Hide cursor while AI is loading, output is focused, or sudo prompt is active.
-    if app.ai_loading.is_none() && app.focus == super::state::Focus::Input && !app.show_sudo_prompt {
+    // Hide cursor while AI is loading, output is focused, or a modal (sudo / history) is active.
+    if app.ai_loading.is_none()
+        && app.focus == super::state::Focus::Input
+        && !app.show_sudo_prompt
+        && !app.show_history_modal
+    {
         let visible_cursor_offset = cursor_char_idx.saturating_sub(start_idx) as u16;
         let cursor_x = input_area
             .x
@@ -508,6 +514,7 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     if app.ai_loading.is_none()
         && app.focus == super::state::Focus::Input
         && app.show_suggestions
+        && !app.show_history_modal
         && !app.current_suggestions.is_empty()
     {
         let visible = app.visible_suggestions();
@@ -1307,6 +1314,174 @@ pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
     });
 }
 
+pub fn compute_history_modal_area(screen: Rect) -> Rect {
+    let target_w: u16 = (screen.width as f32 * 0.72) as u16;
+    let target_h: u16 = (screen.height as f32 * 0.70) as u16;
+
+    let width = target_w.clamp(48, 86).min(screen.width.saturating_sub(4));
+    let height = target_h.clamp(12, 22).min(screen.height.saturating_sub(2));
+
+    let x = (screen.width.saturating_sub(width)) / 2;
+    let y = (screen.height.saturating_sub(height)) / 2;
+
+    Rect::new(x, y, width, height)
+}
+
+pub fn render_history_modal(f: &mut ratatui::Frame, app: &App) {
+    let modal_area = compute_history_modal_area(f.area());
+
+    // Clear cells underneath so background text doesn't bleed through
+    f.render_widget(Clear, modal_area);
+
+    let output_bg = Style::default().bg(OUTPUT_BG);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::White))
+        .style(output_bg);
+    f.render_widget(block, modal_area);
+
+    let cmds = app.filtered_history_commands();
+    let total_count = app
+        .command_history
+        .iter()
+        .filter(|c| {
+            let t = c.trim();
+            !t.eq_ignore_ascii_case("history") && !t.eq_ignore_ascii_case("/history")
+        })
+        .count();
+
+    // Title on top border (monochrome, zero emojis)
+    let title_str = if app.history_modal_filter.is_empty() {
+        format!(" Command History ({} commands) ", cmds.len())
+    } else {
+        format!(" Command History ({}/{} matches) ", cmds.len(), total_count)
+    };
+    let title_line = Line::from(Span::styled(
+        title_str,
+        Style::default().fg(Color::White),
+    ));
+    f.render_widget(
+        Paragraph::new(title_line),
+        Rect::new(modal_area.x + 2, modal_area.y, modal_area.width.saturating_sub(14), 1),
+    );
+
+    // Top-right close button
+    let close_hint = "[Esc Close]";
+    f.render_widget(
+        Paragraph::new(close_hint).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(modal_area.x + modal_area.width.saturating_sub(12), modal_area.y, 11, 1),
+    );
+
+    let inner = Rect::new(
+        modal_area.x + 2,
+        modal_area.y + 1,
+        modal_area.width.saturating_sub(4),
+        modal_area.height.saturating_sub(2),
+    );
+
+    // Search / Filter line
+    let filter_line = if app.history_modal_filter.is_empty() {
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(Color::White)),
+            Span::styled("Type to search history...", Style::default().fg(Color::DarkGray)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("Filter: ", Style::default().fg(Color::White)),
+            Span::styled(&app.history_modal_filter, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled("_", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+    f.render_widget(Paragraph::new(filter_line).style(output_bg), Rect::new(inner.x, inner.y, inner.width, 1));
+
+    // Separator line
+    let sep = "─".repeat(inner.width as usize);
+    f.render_widget(
+        Paragraph::new(Span::styled(sep, Style::default().fg(Color::DarkGray))).style(output_bg),
+        Rect::new(inner.x, inner.y + 1, inner.width, 1),
+    );
+
+    // History list
+    let list_y = inner.y + 2;
+    let list_h = inner.height.saturating_sub(3) as usize; // reserve 1 row for bottom footer
+
+    let scroll = if app.history_modal_selected < app.history_modal_scroll {
+        app.history_modal_selected
+    } else if app.history_modal_selected >= app.history_modal_scroll + list_h {
+        app.history_modal_selected + 1 - list_h
+    } else {
+        app.history_modal_scroll
+    };
+
+    let mut list_lines = Vec::new();
+    if cmds.is_empty() {
+        if app.command_history.is_empty() {
+            list_lines.push(Line::from(Span::styled(
+                "  (No command history recorded yet)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            list_lines.push(Line::from(Span::styled(
+                format!("  No commands matching \"{}\"", app.history_modal_filter),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    } else {
+        let visible_items = cmds.iter().enumerate().skip(scroll).take(list_h);
+        for (i, cmd) in visible_items {
+            let is_selected = i == app.history_modal_selected;
+            let num = i + 1;
+            let max_cmd_len = (inner.width as usize).saturating_sub(10);
+            let display_cmd = if cmd.chars().count() > max_cmd_len && max_cmd_len > 3 {
+                let s: String = cmd.chars().take(max_cmd_len - 3).collect();
+                format!("{}...", s)
+            } else {
+                cmd.clone()
+            };
+
+            if is_selected {
+                list_lines.push(
+                    Line::from(vec![
+                        Span::styled(format!("> {:>3}  ", num), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                        Span::styled(display_cmd, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                    ])
+                    .style(Style::default().bg(Color::Rgb(40, 40, 40))),
+                );
+            } else {
+                list_lines.push(Line::from(vec![
+                    Span::styled(format!("  {:>3}  ", num), Style::default().fg(Color::DarkGray)),
+                    Span::styled(display_cmd, Style::default().fg(Color::White)),
+                ]));
+            }
+        }
+    }
+
+    f.render_widget(Paragraph::new(list_lines).style(output_bg), Rect::new(inner.x, list_y, inner.width, list_h as u16));
+
+    // Footer at bottom of inner area
+    let footer_y = inner.y + inner.height.saturating_sub(1);
+    let footer_line = Line::from(vec![
+        Span::styled("[Up/Down] ", Style::default().fg(Color::White)),
+        Span::styled("Select   ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Enter] ", Style::default().fg(Color::White)),
+        Span::styled("Enter in Input   ", Style::default().fg(Color::DarkGray)),
+        Span::styled("[Esc] ", Style::default().fg(Color::White)),
+        Span::styled("Close", Style::default().fg(Color::DarkGray)),
+    ]);
+    f.render_widget(
+        Paragraph::new(footer_line).centered().style(output_bg),
+        Rect::new(inner.x, footer_y, inner.width, 1),
+    );
+
+    // Position the real terminal cursor at the filter line
+    let cursor_x = (inner.x + 8 + app.history_modal_filter.chars().count() as u16)
+        .min(inner.x + inner.width.saturating_sub(1));
+    f.set_cursor_position(Position {
+        x: cursor_x,
+        y: inner.y,
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1616,5 +1791,51 @@ mod tests {
         assert!(text.contains("sections"), "Visible input should display scrolled content");
         // Should contain the horizontal scrollbar thumb symbol
         assert!(text.contains('━'), "Horizontal scrollbar in X should be rendered");
+    }
+
+    #[test]
+    fn test_compute_history_modal_area_clamping() {
+        let large_screen = Rect::new(0, 0, 120, 40);
+        let modal = compute_history_modal_area(large_screen);
+        assert!(modal.width <= 86 && modal.width >= 48);
+        assert!(modal.height <= 22 && modal.height >= 12);
+        assert_eq!(modal.x, (120 - modal.width) / 2);
+        assert_eq!(modal.y, (40 - modal.height) / 2);
+
+        let small_screen = Rect::new(0, 0, 40, 10);
+        let modal_small = compute_history_modal_area(small_screen);
+        assert!(modal_small.width <= 40);
+        assert!(modal_small.height <= 10);
+    }
+
+    #[test]
+    fn test_render_history_modal() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.command_history = vec![
+            "git status".to_string(),
+            "cargo test".to_string(),
+            "npm run dev".to_string(),
+        ];
+        app.open_history_modal();
+        assert!(app.show_history_modal);
+
+        terminal
+            .draw(|f| {
+                render_history_modal(f, &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("Command History"));
+        assert!(text.contains("Filter:"));
+        assert!(text.contains("[Esc Close]"));
+        assert!(text.contains("git status"));
+        assert!(text.contains("cargo test"));
+        assert!(text.contains("npm run dev"));
+        assert!(text.contains("[Up/Down]"));
+        assert!(text.contains("[Enter]"));
     }
 }

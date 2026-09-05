@@ -484,6 +484,7 @@ pub fn execute_command(input: &str) -> Vec<String> {
                 "  build <spec> | /build - Agentic build: explore, code, create files".to_string(),
                 "  /index <path>    - Index files into RAG".to_string(),
                 "  /settings        - Open AI settings".to_string(),
+                "  history | /history - Browse and select command history".to_string(),
                 "  cd <dir>         - Change directory".to_string(),
                 "  clear            - Clear screen".to_string(),
                 "  exit / quit      - Exit shell".to_string(),
@@ -492,6 +493,10 @@ pub fn execute_command(input: &str) -> Vec<String> {
 
         "/settings" | "settings" => {
             return vec!["__SETTINGS__".to_string()];
+        }
+
+        "/history" | "history" => {
+            return vec!["__HISTORY__".to_string()];
         }
 
         "/ask" | "ask" | "/do" | "do" | "/plan" | "plan" | "/build" | "build" | "/index"

@@ -23,8 +23,8 @@ pub use modules::config::{
 };
 pub use modules::keybindings;
 pub use modules::render::{
-    compute_settings_modal_area, compute_sudo_modal_area, extract_selected_text, render,
-    render_sudo_password_modal,
+    compute_history_modal_area, compute_settings_modal_area, compute_sudo_modal_area,
+    extract_selected_text, render, render_history_modal, render_sudo_password_modal,
 };
 pub use modules::state::{App, Entry, EntryType, Focus, PlanSession, Selection, SudoPromptMode};
 pub use rag::{Document, RagEngine, RagError};
