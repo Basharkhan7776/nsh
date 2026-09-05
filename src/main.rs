@@ -87,8 +87,8 @@ fn run_command_in_terminal_or_capture(
     app: &mut App,
     cmd_str: &str,
 ) -> std::io::Result<()> {
-    if nsh::is_interactive_command(cmd_str) {
-        // Suspend TUI completely for interactive programs (nvim, nano, vim, htop, etc.)
+    if nsh::is_fullscreen_tui(cmd_str) {
+        // Suspend TUI completely only for true fullscreen external applications (nvim, nano, vim, htop, etc.)
         let _ = execute!(
             terminal.backend_mut(),
             DisableMouseCapture,
@@ -139,28 +139,242 @@ fn run_command_in_terminal_or_capture(
         return Ok(());
     }
 
-    // Non-interactive command: execute and capture output into TUI
-    let output = nsh::execute_command(cmd_str);
-    if output.iter().any(|s| s == "__SETTINGS__") {
-        app.settings_state = load_settings_state();
-        app.show_settings = true;
-        app.settings_cursor = 0;
-        app.settings_input.clear();
-        app.settings_nav.clear();
+    // Stream live directly inside nsh output screen (no debounce, no leaving alternate screen)
+    run_live_command_in_ui(terminal, app, cmd_str)
+}
 
-        let base_url = app.settings_state.base_url.clone();
-        let provider = app.settings_state.provider;
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        app.settings_state.available_models = rt.block_on(fetch_models(provider, &base_url));
-    } else if output.iter().any(|s| s == "__CLEAR__") {
-        app.clear();
-        terminal.clear()?;
-    } else if !output.is_empty() {
-        app.add_entry(Entry {
-            entry_type: EntryType::Output,
-            content: output,
-            cwd: String::new(),
-        });
+fn run_live_command_in_ui(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
+    app: &mut App,
+    cmd_str: &str,
+) -> std::io::Result<()> {
+    let clean_str = nsh::clean_interactive_input(cmd_str);
+    let trimmed = clean_str.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+
+    let tokens = nsh::parse_command_line(trimmed);
+    if tokens.is_empty() {
+        return Ok(());
+    }
+
+    let program = tokens[0].as_str();
+    let raw_args: Vec<&str> = tokens.iter().skip(1).map(|s| s.as_str()).collect();
+
+    // Builtins: cd, clear, help, settings
+    match program {
+        "cd" => {
+            let out = nsh::execute_command(trimmed);
+            if !out.is_empty() {
+                app.add_entry(Entry {
+                    entry_type: EntryType::Output,
+                    content: out,
+                    cwd: String::new(),
+                });
+            }
+            return Ok(());
+        }
+        "clear" => {
+            app.clear();
+            terminal.clear()?;
+            return Ok(());
+        }
+        "/help" | "help" => {
+            let out = nsh::execute_command(trimmed);
+            app.add_entry(Entry {
+                entry_type: EntryType::Output,
+                content: out,
+                cwd: String::new(),
+            });
+            return Ok(());
+        }
+        "/settings" | "settings" => {
+            let out = nsh::execute_command(trimmed);
+            if out.iter().any(|s| s == "__SETTINGS__") {
+                app.settings_state = load_settings_state();
+                app.show_settings = true;
+                app.settings_cursor = 0;
+                app.settings_input.clear();
+                app.settings_nav.clear();
+
+                let base_url = app.settings_state.base_url.clone();
+                let provider = app.settings_state.provider;
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                app.settings_state.available_models = rt.block_on(fetch_models(provider, &base_url));
+            }
+            return Ok(());
+        }
+        _ => {}
+    }
+
+    use std::io::{Read, Write};
+    use std::process::{Command, Stdio};
+
+    let mut cmd = if nsh::has_unquoted_shell_metachars(trimmed) {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(trimmed);
+        c
+    } else {
+        let mut final_args = raw_args.clone();
+        if program == "git" {
+            if let Some(sub) = final_args.first() {
+                if matches!(*sub, "push" | "pull" | "clone" | "fetch") {
+                    if !final_args.iter().any(|a| *a == "--progress" || *a == "-q" || *a == "--quiet") {
+                        final_args.push("--progress");
+                    }
+                }
+            }
+        }
+        let mut c = Command::new(program);
+        c.args(&final_args);
+        c
+    };
+
+    cmd.env("FORCE_COLOR", "1");
+    cmd.env("CLICOLOR_FORCE", "1");
+    cmd.env("PYTHONUNBUFFERED", "1");
+    if std::env::var("TERM").is_err() {
+        cmd.env("TERM", "xterm-256color");
+    }
+
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => {
+            app.add_entry(Entry {
+                entry_type: EntryType::Output,
+                content: vec![format!("{}: {}", program, e)],
+                cwd: String::new(),
+            });
+            return Ok(());
+        }
+    };
+
+    let mut child_stdin = child.stdin.take();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
+
+    let (tx, rx) = mpsc::channel::<String>();
+
+    let tx_out = tx.clone();
+    std::thread::spawn(move || {
+        if let Some(mut r) = stdout.take() {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = r.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                if tx_out.send(text).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    let tx_err = tx;
+    std::thread::spawn(move || {
+        if let Some(mut r) = stderr.take() {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = r.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                if tx_err.send(text).is_err() {
+                    break;
+                }
+            }
+        }
+    });
+
+    // Create live output entry in app.entries
+    app.add_entry(Entry {
+        entry_type: EntryType::Output,
+        content: vec![String::new()],
+        cwd: String::new(),
+    });
+
+    render(terminal, app)?;
+
+    loop {
+        let mut has_new_output = false;
+        while let Ok(chunk) = rx.try_recv() {
+            app.append_live_output(&chunk);
+            has_new_output = true;
+        }
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                while let Ok(chunk) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
+                    app.append_live_output(&chunk);
+                }
+                app.finalize_live_output(status);
+                render(terminal, app)?;
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => break,
+        }
+
+        if has_new_output {
+            render(terminal, app)?;
+        }
+
+        if event::poll(std::time::Duration::from_millis(20))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind == KeyEventKind::Press {
+                    if key.code == KeyCode::Esc
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL))
+                    {
+                        let _ = child.kill();
+                        app.append_live_output("\n^C\n");
+                        let _ = child.wait();
+                        app.finalize_live_output(std::process::ExitStatus::default());
+                        render(terminal, app)?;
+                        break;
+                    }
+
+                    match key.code {
+                        KeyCode::PageUp => {
+                            app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_STEP);
+                            render(terminal, app)?;
+                        }
+                        KeyCode::PageDown => {
+                            let max_scroll = app.total_lines.saturating_sub(1);
+                            app.scroll_offset = (app.scroll_offset + SCROLL_STEP).min(max_scroll);
+                            render(terminal, app)?;
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(ref mut stdin) = child_stdin {
+                                let mut b = [0u8; 4];
+                                let s = c.encode_utf8(&mut b);
+                                let _ = stdin.write_all(s.as_bytes());
+                                let _ = stdin.flush();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(ref mut stdin) = child_stdin {
+                                let _ = stdin.write_all(b"\n");
+                                let _ = stdin.flush();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(ref mut stdin) = child_stdin {
+                                let _ = stdin.write_all(b"\x08");
+                                let _ = stdin.flush();
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

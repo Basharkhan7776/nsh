@@ -300,6 +300,87 @@ impl App {
         self.scroll_to_bottom();
     }
 
+    // Append a streaming chunk of live output to the active output entry, handling \r and \n
+    pub fn append_live_output(&mut self, raw_chunk: &str) {
+        if raw_chunk.is_empty() {
+            return;
+        }
+
+        let chunk = super::commands::strip_ansi_escapes(raw_chunk);
+        if chunk.is_empty() {
+            return;
+        }
+
+        if self.entries.is_empty() {
+            self.entries.push(Entry {
+                entry_type: EntryType::Output,
+                content: vec![String::new()],
+                cwd: String::new(),
+            });
+        }
+        let last_idx = self.entries.len() - 1;
+        if self.entries[last_idx].entry_type != EntryType::Output {
+            self.entries.push(Entry {
+                entry_type: EntryType::Output,
+                content: vec![String::new()],
+                cwd: String::new(),
+            });
+        }
+
+        let entry = self.entries.last_mut().unwrap();
+        if entry.content.is_empty() {
+            entry.content.push(String::new());
+        }
+
+        for c in chunk.chars() {
+            if c == '\r' {
+                // Carriage return: reset current line to allow progress bars to update in place
+                if let Some(last_line) = entry.content.last_mut() {
+                    last_line.clear();
+                }
+            } else if c == '\n' {
+                // Newline: advance to next line
+                entry.content.push(String::new());
+            } else {
+                if let Some(last_line) = entry.content.last_mut() {
+                    last_line.push(c);
+                }
+            }
+        }
+
+        self.recalc_total_lines();
+        self.scroll_to_bottom();
+    }
+
+    // Finalize live output entry when command terminates
+    pub fn finalize_live_output(&mut self, status: std::process::ExitStatus) {
+        if let Some(entry) = self.entries.last_mut() {
+            if entry.entry_type == EntryType::Output {
+                // Remove trailing empty line if text ended with newline
+                if entry.content.len() > 1 && entry.content.last().is_some_and(|l| l.is_empty()) {
+                    entry.content.pop();
+                }
+
+                // If nothing was printed:
+                if entry.content.len() == 1 && entry.content[0].is_empty() {
+                    if status.success() {
+                        self.entries.pop();
+                    } else if let Some(code) = status.code() {
+                        if code != 130 {
+                            entry.content[0] = format!("Process exited with status {}", code);
+                        } else {
+                            self.entries.pop();
+                        }
+                    } else {
+                        self.entries.pop();
+                    }
+                }
+            }
+        }
+        self.recalc_total_lines();
+        self.scroll_to_bottom();
+    }
+
     // Recalculate total line count from all entries
     pub fn recalc_total_lines(&mut self) {
         self.total_lines = self.entries.iter().map(|e| e.content.len()).sum();
@@ -592,5 +673,31 @@ mod tests {
         assert!(app.sudo_password.is_empty());
         assert!(app.pending_sudo_command.is_none());
         assert!(app.sudo_error.is_none());
+    }
+
+    #[test]
+    fn test_append_live_output_carriage_return_overwrite() {
+        let mut app = App::new();
+        // Progress bar simulation: "Writing: 10%\rWriting: 50%\rWriting: 100%\nDone\n"
+        app.append_live_output("Writing: 10%\r");
+        assert_eq!(app.entries.len(), 1);
+        assert_eq!(app.entries[0].content, vec![""]);
+
+        app.append_live_output("Writing: 50%\r");
+        assert_eq!(app.entries[0].content, vec![""]);
+
+        app.append_live_output("Writing: 100%\nDone\n");
+        assert_eq!(
+            app.entries[0].content,
+            vec!["Writing: 100%".to_string(), "Done".to_string(), "".to_string()]
+        );
+
+        // Finalize cleans trailing empty line
+        let status = std::process::Command::new("true").status().unwrap();
+        app.finalize_live_output(status);
+        assert_eq!(
+            app.entries[0].content,
+            vec!["Writing: 100%".to_string(), "Done".to_string()]
+        );
     }
 }

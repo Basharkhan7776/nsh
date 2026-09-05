@@ -11,8 +11,9 @@ pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, Provi
 pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
 pub use modules::commands::{
     clean_interactive_input, command_needs_sudo_password, execute_command,
-    execute_interactive_command, is_interactive_command, parse_command_line, prompt_gui_password,
-    shorten_cwd, validate_and_cache_sudo_password,
+    execute_interactive_command, has_unquoted_shell_metachars, is_fullscreen_tui,
+    is_interactive_command, parse_command_line, prompt_gui_password, shorten_cwd,
+    strip_ansi_escapes, validate_and_cache_sudo_password,
 };
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{
