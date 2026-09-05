@@ -86,6 +86,8 @@ fn run_command_in_terminal_or_capture(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     cmd_str: &str,
+    askpass_socket: Option<&std::path::Path>,
+    askpass_rx: Option<&mpsc::Receiver<nsh::AskPassPromptEvent>>,
 ) -> std::io::Result<()> {
     if nsh::is_fullscreen_tui(cmd_str) {
         // Suspend TUI completely only for true fullscreen external applications (nvim, nano, vim, htop, etc.)
@@ -140,13 +142,15 @@ fn run_command_in_terminal_or_capture(
     }
 
     // Stream live directly inside nsh output screen (no debounce, no leaving alternate screen)
-    run_live_command_in_ui(terminal, app, cmd_str)
+    run_live_command_in_ui(terminal, app, cmd_str, askpass_socket, askpass_rx)
 }
 
 fn run_live_command_in_ui(
     terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut App,
     cmd_str: &str,
+    askpass_socket: Option<&std::path::Path>,
+    askpass_rx: Option<&mpsc::Receiver<nsh::AskPassPromptEvent>>,
 ) -> std::io::Result<()> {
     let clean_str = nsh::clean_interactive_input(cmd_str);
     let trimmed = clean_str.trim();
@@ -241,6 +245,9 @@ fn run_live_command_in_ui(
     if std::env::var("TERM").is_err() {
         cmd.env("TERM", "xterm-256color");
     }
+    if let Some(sock) = askpass_socket {
+        nsh::inject_askpass_env(&mut cmd, sock);
+    }
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -305,6 +312,8 @@ fn run_live_command_in_ui(
 
     render(terminal, app)?;
 
+    let mut active_auth_response_tx: Option<mpsc::Sender<Option<String>>> = None;
+
     loop {
         let mut has_new_output = false;
         while let Ok(chunk) = rx.try_recv() {
@@ -312,10 +321,53 @@ fn run_live_command_in_ui(
             has_new_output = true;
         }
 
+        // Check if external AskPass prompt arrived from OpenSSH/Git child process
+        if let Some(rx_ap) = askpass_rx {
+            while let Ok(event) = rx_ap.try_recv() {
+                app.open_auth_modal(
+                    event.prompt_type,
+                    &event.title,
+                    &event.description,
+                    &event.label,
+                    event.is_masked,
+                    None,
+                );
+                active_auth_response_tx = Some(event.response_tx);
+                has_new_output = true;
+            }
+        }
+
+        // Detect live stream password prompts (tools that don't support AskPass)
+        if !app.auth_modal.is_active {
+            if let Some(last_entry) = app.entries.last() {
+                if let Some(last_line) = last_entry.content.last() {
+                    let trimmed_last = last_line.trim();
+                    if (trimmed_last.ends_with("password:")
+                        || trimmed_last.ends_with("Password:")
+                        || trimmed_last.ends_with("passphrase:")
+                        || trimmed_last.ends_with("PIN:")
+                        || trimmed_last.starts_with("[sudo] password for"))
+                        && !trimmed_last.contains("Authentication failed")
+                        && !trimmed_last.contains("cancelled")
+                    {
+                        let (pt, title, desc, label, is_masked) = nsh::classify_prompt(trimmed_last);
+                        app.open_auth_modal(pt, &title, &desc, &label, is_masked, None);
+                        has_new_output = true;
+                    }
+                }
+            }
+        }
+
         match child.try_wait() {
             Ok(Some(status)) => {
                 while let Ok(chunk) = rx.recv_timeout(std::time::Duration::from_millis(50)) {
                     app.append_live_output(&chunk);
+                }
+                if app.auth_modal.is_active {
+                    if let Some(tx) = active_auth_response_tx.take() {
+                        let _ = tx.send(None);
+                    }
+                    app.close_auth_modal();
                 }
                 app.finalize_live_output(status);
                 render(terminal, app)?;
@@ -330,53 +382,140 @@ fn run_live_command_in_ui(
         }
 
         if event::poll(std::time::Duration::from_millis(20))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if key.code == KeyCode::Esc
-                        || (key.code == KeyCode::Char('c')
-                            && key.modifiers.contains(KeyModifiers::CONTROL))
-                    {
-                        let _ = child.kill();
-                        app.append_live_output("\n^C\n");
-                        let _ = child.wait();
-                        app.finalize_live_output(std::process::ExitStatus::default());
-                        render(terminal, app)?;
-                        break;
-                    }
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        // Modal active: direct keys to authentication modal
+                        if app.auth_modal.is_active {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(None);
+                                    }
+                                    app.close_auth_modal();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(None);
+                                    }
+                                    app.close_auth_modal();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Backspace => {
+                                    app.auth_modal_backspace();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Delete => {
+                                    app.auth_modal_delete();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Left => {
+                                    app.auth_modal_cursor_left();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Right => {
+                                    app.auth_modal_cursor_right();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Home => {
+                                    app.auth_modal_cursor_home();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::End => {
+                                    app.auth_modal_cursor_end();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_cursor_home();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_cursor_end();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_clear_input();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_delete_word();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Enter => {
+                                    let secret = std::mem::take(&mut app.auth_modal.input_value);
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(Some(secret));
+                                    } else if let Some(ref mut stdin) = child_stdin {
+                                        let _ = stdin.write_all(secret.as_bytes());
+                                        let _ = stdin.write_all(b"\n");
+                                        let _ = stdin.flush();
+                                    }
+                                    app.close_auth_modal();
+                                    render(terminal, app)?;
+                                }
+                                KeyCode::Char(c) => {
+                                    app.auth_modal_input_char(c);
+                                    render(terminal, app)?;
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
 
-                    match key.code {
-                        KeyCode::PageUp => {
-                            app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_STEP);
+                        if key.code == KeyCode::Esc
+                            || (key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL))
+                        {
+                            let _ = child.kill();
+                            app.append_live_output("\n^C\n");
+                            let _ = child.wait();
+                            app.finalize_live_output(std::process::ExitStatus::default());
                             render(terminal, app)?;
+                            break;
                         }
-                        KeyCode::PageDown => {
-                            let max_scroll = app.total_lines.saturating_sub(1);
-                            app.scroll_offset = (app.scroll_offset + SCROLL_STEP).min(max_scroll);
-                            render(terminal, app)?;
-                        }
-                        KeyCode::Char(c) => {
-                            if let Some(ref mut stdin) = child_stdin {
-                                let mut b = [0u8; 4];
-                                let s = c.encode_utf8(&mut b);
-                                let _ = stdin.write_all(s.as_bytes());
-                                let _ = stdin.flush();
+
+                        match key.code {
+                            KeyCode::PageUp => {
+                                app.scroll_offset = app.scroll_offset.saturating_sub(SCROLL_STEP);
+                                render(terminal, app)?;
                             }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(ref mut stdin) = child_stdin {
-                                let _ = stdin.write_all(b"\n");
-                                let _ = stdin.flush();
+                            KeyCode::PageDown => {
+                                let max_scroll = app.total_lines.saturating_sub(1);
+                                app.scroll_offset = (app.scroll_offset + SCROLL_STEP).min(max_scroll);
+                                render(terminal, app)?;
                             }
-                        }
-                        KeyCode::Backspace => {
-                            if let Some(ref mut stdin) = child_stdin {
-                                let _ = stdin.write_all(b"\x08");
-                                let _ = stdin.flush();
+                            KeyCode::Char(c) => {
+                                if let Some(ref mut stdin) = child_stdin {
+                                    let mut b = [0u8; 4];
+                                    let s = c.encode_utf8(&mut b);
+                                    let _ = stdin.write_all(s.as_bytes());
+                                    let _ = stdin.flush();
+                                }
                             }
+                            KeyCode::Enter => {
+                                if let Some(ref mut stdin) = child_stdin {
+                                    let _ = stdin.write_all(b"\n");
+                                    let _ = stdin.flush();
+                                }
+                            }
+                            KeyCode::Backspace => {
+                                if let Some(ref mut stdin) = child_stdin {
+                                    let _ = stdin.write_all(b"\x08");
+                                    let _ = stdin.flush();
+                                }
+                            }
+                            _ => {}
                         }
-                        _ => {}
                     }
                 }
+                Event::Paste(text) => {
+                    if app.auth_modal.is_active {
+                        app.auth_modal_paste(&text);
+                        render(terminal, app)?;
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -390,6 +529,7 @@ fn run_ai_task_with_ui(
     ai_cmd: AiCommand,
     query: &str,
     ai_cfg: &nsh::ai::AiConfig,
+    askpass_rx: Option<&mpsc::Receiver<nsh::AskPassPromptEvent>>,
 ) -> std::io::Result<Option<String>> {
     let verb = match ai_cmd {
         AiCommand::Ask => "Asking",
@@ -448,11 +588,27 @@ fn run_ai_task_with_ui(
     });
 
     let mut final_result_text = None;
+    let mut active_auth_response_tx: Option<std::sync::mpsc::Sender<Option<String>>> = None;
 
     // Process live agent events & animate spinner until done
     loop {
         if let Some(ref mut loading) = app.ai_loading {
             loading.frame = loading.frame.wrapping_add(1);
+        }
+
+        // Check if command executed by agent requested password authentication via AskPass
+        if let Some(rx_ap) = askpass_rx {
+            while let Ok(event) = rx_ap.try_recv() {
+                app.open_auth_modal(
+                    event.prompt_type,
+                    &event.title,
+                    &event.description,
+                    &event.label,
+                    event.is_masked,
+                    None,
+                );
+                active_auth_response_tx = Some(event.response_tx);
+            }
         }
 
         let mut task_completed = false;
@@ -578,18 +734,93 @@ fn run_ai_task_with_ui(
 
         let mut user_cancelled = false;
         while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
-            if let Ok(Event::Key(key)) = event::read() {
-                if key.code == KeyCode::Esc
-                    || (key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL))
-                {
-                    user_cancelled = true;
-                    break;
+            if let Ok(ev) = event::read() {
+                match ev {
+                    Event::Key(key) if key.kind == KeyEventKind::Press => {
+                        if app.auth_modal.is_active {
+                            match key.code {
+                                KeyCode::Esc => {
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(None);
+                                    }
+                                    app.close_auth_modal();
+                                }
+                                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(None);
+                                    }
+                                    app.close_auth_modal();
+                                }
+                                KeyCode::Backspace => {
+                                    app.auth_modal_backspace();
+                                }
+                                KeyCode::Delete => {
+                                    app.auth_modal_delete();
+                                }
+                                KeyCode::Left => {
+                                    app.auth_modal_cursor_left();
+                                }
+                                KeyCode::Right => {
+                                    app.auth_modal_cursor_right();
+                                }
+                                KeyCode::Home => {
+                                    app.auth_modal_cursor_home();
+                                }
+                                KeyCode::End => {
+                                    app.auth_modal_cursor_end();
+                                }
+                                KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_cursor_home();
+                                }
+                                KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_cursor_end();
+                                }
+                                KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_clear_input();
+                                }
+                                KeyCode::Char('w') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                                    app.auth_modal_delete_word();
+                                }
+                                KeyCode::Enter => {
+                                    let secret = std::mem::take(&mut app.auth_modal.input_value);
+                                    if let Some(tx) = active_auth_response_tx.take() {
+                                        let _ = tx.send(Some(secret));
+                                    }
+                                    app.close_auth_modal();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.auth_modal_input_char(c);
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+
+                        if key.code == KeyCode::Esc
+                            || (key.code == KeyCode::Char('c')
+                                && key.modifiers.contains(KeyModifiers::CONTROL))
+                        {
+                            user_cancelled = true;
+                            break;
+                        }
+                    }
+                    Event::Paste(text) => {
+                        if app.auth_modal.is_active {
+                            app.auth_modal_paste(&text);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
         if user_cancelled {
+            if app.auth_modal.is_active {
+                if let Some(tx) = active_auth_response_tx.take() {
+                    let _ = tx.send(None);
+                }
+                app.close_auth_modal();
+            }
             cancel_flag.store(true, std::sync::atomic::Ordering::Relaxed);
             app.ai_loading = None;
             app.add_entry(Entry {
@@ -603,10 +834,46 @@ fn run_ai_task_with_ui(
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    if app.auth_modal.is_active {
+        if let Some(tx) = active_auth_response_tx.take() {
+            let _ = tx.send(None);
+        }
+        app.close_auth_modal();
+    }
+
     Ok(final_result_text)
 }
 
 fn main() -> std::io::Result<()> {
+    // Check if invoked as an AskPass helper by OpenSSH, Git, or Sudo
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        // OpenSSH calls `$SSH_ASKPASS "prompt"`
+        // Git calls `$GIT_ASKPASS "prompt"`
+        // Explicit flag: `nsh --askpass "prompt"`
+        if args[1] == "--askpass" {
+            let prompt = args.get(2).map(|s| s.as_str()).unwrap_or("Password:");
+            let code = match nsh::run_askpass_client(prompt) {
+                std::process::ExitCode::SUCCESS => 0,
+                _ => 1,
+            };
+            std::process::exit(code);
+        } else if std::env::var("NSH_ASKPASS_SOCKET").is_ok()
+            || args[1].to_lowercase().contains("password")
+            || args[1].to_lowercase().contains("passphrase")
+            || args[1].to_lowercase().contains("pin")
+            || args[1].to_lowercase().contains("continue connecting")
+            || args[1].to_lowercase().contains("authenticity of host")
+        {
+            let prompt = &args[1];
+            let code = match nsh::run_askpass_client(prompt) {
+                std::process::ExitCode::SUCCESS => 0,
+                _ => 1,
+            };
+            std::process::exit(code);
+        }
+    }
+
     // Initialize terminal for alternate screen buffer with bracketed paste and mouse capture.
     // Mouse capture allows smooth mouse scrolling, click-to-focus on output, and drag text selection.
     enable_raw_mode()?;
@@ -615,6 +882,14 @@ fn main() -> std::io::Result<()> {
 
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
+
+    // Initialize AskPass server for background OpenSSH / Git / Sudo IPC prompts
+    let (askpass_server, askpass_rx) = match nsh::AskPassServer::start() {
+        Ok((server, rx)) => (Some(server), Some(rx)),
+        Err(_) => (None, None),
+    };
+    let askpass_socket_path = askpass_server.as_ref().map(|s| s.socket_path.clone());
+    let mut main_auth_response_tx: Option<std::sync::mpsc::Sender<Option<String>>> = None;
 
     // Initialize application state
     let mut app = App::new();
@@ -642,6 +917,26 @@ fn main() -> std::io::Result<()> {
         render(&mut terminal, &mut app)?;
 
         loop {
+            // Check for external AskPass prompt requests arriving from background processes
+            let mut had_askpass = false;
+            if let Some(ref rx_ap) = askpass_rx {
+                while let Ok(event) = rx_ap.try_recv() {
+                    app.open_auth_modal(
+                        event.prompt_type,
+                        &event.title,
+                        &event.description,
+                        &event.label,
+                        event.is_masked,
+                        None,
+                    );
+                    main_auth_response_tx = Some(event.response_tx);
+                    had_askpass = true;
+                }
+            }
+            if had_askpass {
+                break;
+            }
+
             match event::poll(std::time::Duration::from_millis(50)) {
                 Ok(true) => {
                     if let Ok(event) = event::read() {
@@ -686,52 +981,99 @@ fn main() -> std::io::Result<()> {
                                     break;
                                 }
 
-                                // Sudo password modal input handling
-                                if app.show_sudo_prompt {
+                                // Unified Authentication / Sudo / SSH modal input handling
+                                if app.auth_modal.is_active || app.show_sudo_prompt {
                                     match key_code {
                                         KeyCode::Esc => {
-                                            app.clear_sudo_state();
-                                            app.add_entry(Entry {
-                                                entry_type: EntryType::Output,
-                                                content: vec!["sudo: authentication cancelled".to_string()],
-                                                cwd: String::new(),
-                                            });
+                                            if let Some(tx) = main_auth_response_tx.take() {
+                                                let _ = tx.send(None);
+                                            }
+                                            if app.show_sudo_prompt {
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Output,
+                                                    content: vec!["sudo: authentication cancelled".to_string()],
+                                                    cwd: String::new(),
+                                                });
+                                            }
+                                            app.close_auth_modal();
                                         }
                                         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
-                                            app.clear_sudo_state();
-                                            app.add_entry(Entry {
-                                                entry_type: EntryType::Output,
-                                                content: vec!["sudo: authentication cancelled".to_string()],
-                                                cwd: String::new(),
-                                            });
+                                            if let Some(tx) = main_auth_response_tx.take() {
+                                                let _ = tx.send(None);
+                                            }
+                                            if app.show_sudo_prompt {
+                                                app.add_entry(Entry {
+                                                    entry_type: EntryType::Output,
+                                                    content: vec!["sudo: authentication cancelled".to_string()],
+                                                    cwd: String::new(),
+                                                });
+                                            }
+                                            app.close_auth_modal();
                                         }
                                         KeyCode::Backspace => {
-                                            app.sudo_password.pop();
-                                            app.sudo_error = None;
+                                            app.auth_modal_backspace();
+                                        }
+                                        KeyCode::Delete => {
+                                            app.auth_modal_delete();
+                                        }
+                                        KeyCode::Left => {
+                                            app.auth_modal_cursor_left();
+                                        }
+                                        KeyCode::Right => {
+                                            app.auth_modal_cursor_right();
+                                        }
+                                        KeyCode::Home => {
+                                            app.auth_modal_cursor_home();
+                                        }
+                                        KeyCode::End => {
+                                            app.auth_modal_cursor_end();
+                                        }
+                                        KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                            app.auth_modal_cursor_home();
+                                        }
+                                        KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                            app.auth_modal_cursor_end();
                                         }
                                         KeyCode::Char('u') if modifiers.contains(KeyModifiers::CONTROL) => {
-                                            app.sudo_password.clear();
-                                            app.sudo_error = None;
+                                            app.auth_modal_clear_input();
+                                        }
+                                        KeyCode::Char('w') if modifiers.contains(KeyModifiers::CONTROL) => {
+                                            app.auth_modal_delete_word();
                                         }
                                         KeyCode::Enter => {
-                                            let password = std::mem::take(&mut app.sudo_password);
-                                            match nsh::validate_and_cache_sudo_password(&password) {
-                                                Ok(()) => {
-                                                    let cmd = app.pending_sudo_command.take().unwrap_or_default();
-                                                    app.clear_sudo_state();
-                                                    if !cmd.is_empty() {
-                                                        run_command_in_terminal_or_capture(&mut terminal, &mut app, &cmd)?;
+                                            let secret = std::mem::take(&mut app.auth_modal.input_value);
+                                            if let Some(tx) = main_auth_response_tx.take() {
+                                                let _ = tx.send(Some(secret));
+                                                app.close_auth_modal();
+                                            } else if app.pending_sudo_command.is_some() {
+                                                match nsh::validate_and_cache_sudo_password(&secret) {
+                                                    Ok(()) => {
+                                                        let cmd = app.pending_sudo_command.take().unwrap_or_default();
+                                                        app.close_auth_modal();
+                                                        if !cmd.is_empty() {
+                                                            run_command_in_terminal_or_capture(
+                                                                &mut terminal,
+                                                                &mut app,
+                                                                &cmd,
+                                                                askpass_socket_path.as_deref(),
+                                                                askpass_rx.as_ref(),
+                                                            )?;
+                                                        }
+                                                    }
+                                                    Err(err) => {
+                                                        app.auth_modal.error_message = Some(err.clone());
+                                                        app.auth_modal.input_value.clear();
+                                                        app.auth_modal.cursor_pos = 0;
+                                                        app.sudo_error = Some(err);
+                                                        app.sudo_password.clear();
                                                     }
                                                 }
-                                                Err(err) => {
-                                                    app.sudo_error = Some(err);
-                                                    app.sudo_password.clear();
-                                                }
+                                            } else {
+                                                app.close_auth_modal();
                                             }
                                         }
                                         KeyCode::Char(c) => {
-                                            app.sudo_password.push(c);
-                                            app.sudo_error = None;
+                                            app.auth_modal_input_char(c);
                                         }
                                         _ => {}
                                     }
@@ -853,7 +1195,7 @@ fn main() -> std::io::Result<()> {
                                                     "Execute the following approved plan step-by-step to achieve the goal.\n\nApproved Plan:\n{}\n\nGoal: {}",
                                                     session.current_plan, session.goal
                                                 );
-                                                run_ai_task_with_ui(&mut terminal, &mut app, AiCommand::Build, &build_prompt, &ai_cfg)?;
+                                                run_ai_task_with_ui(&mut terminal, &mut app, AiCommand::Build, &build_prompt, &ai_cfg, askpass_rx.as_ref())?;
                                             } else if lower == "deny" || lower == "no" || lower == "n" || lower == "cancel" || lower == "/deny" {
                                                 app.clear_plan_session();
                                                 app.current_input.clear();
@@ -894,6 +1236,7 @@ fn main() -> std::io::Result<()> {
                                                     AiCommand::Plan,
                                                     &refine_prompt,
                                                     &ai_cfg,
+                                                    askpass_rx.as_ref(),
                                                 )?;
                                                 if let Some(plan_text) = updated_plan {
                                                     let clean = plan_text.trim().to_string();
@@ -997,6 +1340,7 @@ fn main() -> std::io::Result<()> {
                                                     ai_cmd,
                                                     &query,
                                                     &ai_cfg,
+                                                    askpass_rx.as_ref(),
                                                 )?;
 
                                                 if ai_cmd == AiCommand::Plan {
@@ -1044,7 +1388,13 @@ fn main() -> std::io::Result<()> {
                                                             handled_via_gui = true;
                                                             match nsh::validate_and_cache_sudo_password(&pass) {
                                                                 Ok(()) => {
-                                                                    run_command_in_terminal_or_capture(&mut terminal, &mut app, &input)?;
+                                                                    run_command_in_terminal_or_capture(
+                                                                        &mut terminal,
+                                                                        &mut app,
+                                                                        &input,
+                                                                        askpass_socket_path.as_deref(),
+                                                                        askpass_rx.as_ref(),
+                                                                    )?;
                                                                 }
                                                                 Err(err) => {
                                                                     app.add_entry(Entry {
@@ -1059,12 +1409,24 @@ fn main() -> std::io::Result<()> {
 
                                                     if !handled_via_gui {
                                                         app.pending_sudo_command = Some(input.clone());
-                                                        app.show_sudo_prompt = true;
-                                                        app.sudo_password.clear();
-                                                        app.sudo_error = None;
+                                                        let current_user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+                                                        app.open_auth_modal(
+                                                            nsh::AuthPromptType::SudoPassword,
+                                                            "Authentication Required",
+                                                            &format!("Command: {}", input.trim()),
+                                                            &format!("[sudo] password for {}:", current_user),
+                                                            true,
+                                                            None,
+                                                        );
                                                     }
                                                 } else {
-                                                    run_command_in_terminal_or_capture(&mut terminal, &mut app, &input)?;
+                                                    run_command_in_terminal_or_capture(
+                                                        &mut terminal,
+                                                        &mut app,
+                                                        &input,
+                                                        askpass_socket_path.as_deref(),
+                                                        askpass_rx.as_ref(),
+                                                    )?;
                                                 }
                                             }
                                         }
@@ -1215,7 +1577,9 @@ fn main() -> std::io::Result<()> {
                             // Terminal paste (Ctrl+Shift+V / right-click paste with
                             // bracketed paste enabled). Prefer this path for API keys.
                             Event::Paste(text) => {
-                                if app.show_settings {
+                                if app.auth_modal.is_active || app.show_sudo_prompt {
+                                    app.auth_modal_paste(&text);
+                                } else if app.show_settings {
                                     settings_apply_paste(&mut app, &text);
                                 } else {
                                     // Insert into the shell input line.
@@ -1230,6 +1594,35 @@ fn main() -> std::io::Result<()> {
 
                             // Mouse input handling
                             Event::Mouse(mouse) => {
+                                // Auth modal mode: click outside or [Esc Cancel] dismisses modal
+                                if (app.auth_modal.is_active || app.show_sudo_prompt)
+                                    && mouse.kind == MouseEventKind::Down(MouseButton::Left)
+                                {
+                                    let screen_size = terminal.size().unwrap_or_default();
+                                    let screen_area = ratatui::layout::Rect::new(0, 0, screen_size.width, screen_size.height);
+                                    let modal = nsh::compute_auth_modal_area(screen_area);
+
+                                    // Click outside modal or top-right [Esc Cancel] closes auth modal
+                                    if mouse.column < modal.x
+                                        || mouse.column >= modal.x + modal.width
+                                        || mouse.row < modal.y
+                                        || mouse.row >= modal.y + modal.height
+                                        || (mouse.row == modal.y && mouse.column >= modal.x + modal.width.saturating_sub(14))
+                                    {
+                                        if let Some(tx) = main_auth_response_tx.take() {
+                                            let _ = tx.send(None);
+                                        }
+                                        if app.show_sudo_prompt {
+                                            app.add_entry(Entry {
+                                                entry_type: EntryType::Output,
+                                                content: vec!["sudo: authentication cancelled".to_string()],
+                                                cwd: String::new(),
+                                            });
+                                        }
+                                        app.close_auth_modal();
+                                    }
+                                    break;
+                                }
                                 // History modal mode: click or scroll
                                 if app.show_history_modal {
                                     let screen_size = terminal.size().unwrap_or_default();
@@ -1385,7 +1778,7 @@ fn main() -> std::io::Result<()> {
                                 let terminal_size = terminal.size().unwrap_or_default();
                                 let input_y = terminal_size.height.saturating_sub(if app.ai_loading.is_some() { 4 } else { 3 });
 
-                                if !app.show_settings && !app.show_sudo_prompt {
+                                if !app.show_settings && !app.show_sudo_prompt && !app.auth_modal.is_active {
                                     match mouse.kind {
                                         MouseEventKind::Down(MouseButton::Left) => {
                                             if mouse.row < input_y {

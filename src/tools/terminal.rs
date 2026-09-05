@@ -539,10 +539,14 @@ pub fn touch(path: &str) -> Result<(), TerminalError> {
 }
 
 pub fn exec_cmd(cmd: &str) -> Result<String, TerminalError> {
-    let output = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(cmd)
-        .output()?;
+    let mut command = std::process::Command::new("sh");
+    command.arg("-c").arg(cmd);
+
+    if let Ok(socket) = std::env::var("NSH_ASKPASS_SOCKET") {
+        crate::modules::commands::inject_askpass_env(&mut command, std::path::Path::new(&socket));
+    }
+
+    let output = command.output()?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
     let combined = if stderr.is_empty() {

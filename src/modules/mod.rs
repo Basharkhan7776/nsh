@@ -1,5 +1,6 @@
 // Module declarations for shell application
 
+pub mod askpass;
 pub mod commands;
 pub mod completions;
 pub mod config;

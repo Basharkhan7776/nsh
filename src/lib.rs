@@ -9,11 +9,15 @@ pub mod rag;
 // Re-export public types and functions
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
 pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
+pub use modules::askpass::{
+    classify_prompt, run_askpass_client, secure_wipe_string, AskPassPromptEvent, AskPassServer,
+    AuthPromptType,
+};
 pub use modules::commands::{
     clean_interactive_input, command_needs_sudo_password, execute_command,
-    execute_interactive_command, has_unquoted_shell_metachars, is_fullscreen_tui,
-    is_interactive_command, parse_command_line, prompt_gui_password, shorten_cwd,
-    strip_ansi_escapes, validate_and_cache_sudo_password,
+    execute_interactive_command, has_unquoted_shell_metachars, inject_askpass_env,
+    is_fullscreen_tui, is_interactive_command, parse_command_line, prompt_gui_password,
+    shorten_cwd, strip_ansi_escapes, validate_and_cache_sudo_password,
 };
 pub use modules::completions::PATH_COMMANDS;
 pub use modules::config::{
@@ -23,10 +27,13 @@ pub use modules::config::{
 };
 pub use modules::keybindings;
 pub use modules::render::{
-    compute_history_modal_area, compute_settings_modal_area, compute_sudo_modal_area,
-    extract_selected_text, render, render_history_modal, render_sudo_password_modal,
+    compute_auth_modal_area, compute_history_modal_area, compute_settings_modal_area,
+    compute_sudo_modal_area, extract_selected_text, render, render_auth_modal,
+    render_history_modal, render_sudo_password_modal,
 };
-pub use modules::state::{App, Entry, EntryType, Focus, PlanSession, Selection, SudoPromptMode};
+pub use modules::state::{
+    App, AuthModalState, Entry, EntryType, Focus, PlanSession, Selection, SudoPromptMode,
+};
 pub use rag::{Document, RagEngine, RagError};
 pub use storage::{LocalStorage, NshConfig, StorageError, VectorError, VectorStore};
 pub use tools::{cat, copy_path, delete_path, execute_tool, get_tool_definitions, grep, ls, mkdir, move_path, web_search, write_file};

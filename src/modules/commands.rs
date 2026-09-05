@@ -360,12 +360,37 @@ pub fn is_fullscreen_tui(input: &str) -> bool {
             | "screen"
             | "zellij"
             | "byobu"
-            | "ssh"
             | "mosh"
             | "telnet"
             | "nmtui"
             | "ncmpcpp"
     ) {
+        return true;
+    }
+
+    // SSH: interactive remote shell (no remote command) is fullscreen TUI; remote command execution streams in UI
+    if program == "ssh" {
+        let mut idx = 0;
+        let mut host_found = false;
+        while idx < args.len() {
+            let arg = args[idx];
+            if arg.starts_with('-') {
+                if matches!(
+                    arg,
+                    "-p" | "-i" | "-o" | "-c" | "-b" | "-e" | "-l" | "-F" | "-J" | "-O" | "-S" | "-W"
+                ) {
+                    idx += 2;
+                } else {
+                    idx += 1;
+                }
+            } else if !host_found {
+                host_found = true;
+                idx += 1;
+            } else {
+                // Found a non-flag argument after host -> remote command execution, not fullscreen TUI
+                return false;
+            }
+        }
         return true;
     }
 
@@ -712,6 +737,20 @@ pub fn prompt_gui_password(title: &str) -> Option<String> {
     None
 }
 
+/// Inject OpenSSH, Git, and Sudo AskPass environment variables pointing to nsh
+pub fn inject_askpass_env(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
+    if let Ok(exe) = std::env::current_exe() {
+        cmd.env("SSH_ASKPASS", &exe);
+        cmd.env("SSH_ASKPASS_REQUIRE", "force");
+        cmd.env("GIT_ASKPASS", &exe);
+        cmd.env("SUDO_ASKPASS", &exe);
+        cmd.env("NSH_ASKPASS_SOCKET", socket_path);
+        if std::env::var("DISPLAY").is_err() {
+            cmd.env("DISPLAY", ":0");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -837,6 +876,17 @@ mod tests {
         assert!(!is_fullscreen_tui("ls -la"));
         assert!(!is_fullscreen_tui("cat Cargo.toml"));
         assert!(!is_fullscreen_tui("echo hello world"));
+
+        // SSH interactive shell vs streaming remote command
+        assert!(is_fullscreen_tui("ssh user@vps"));
+        assert!(is_fullscreen_tui("ssh -p 2222 user@vps"));
+        assert!(is_fullscreen_tui("ssh -i ~/.ssh/id_rsa user@vps"));
+        assert!(!is_fullscreen_tui("ssh user@vps uptime"));
+        assert!(!is_fullscreen_tui("ssh user@vps ls -la"));
+        assert!(!is_fullscreen_tui("ssh -p 22 user@vps \"df -h\""));
+        assert!(!is_fullscreen_tui("scp file.txt user@vps:/tmp"));
+        assert!(!is_fullscreen_tui("sftp user@vps"));
+        assert!(!is_fullscreen_tui("ssh-copy-id user@vps"));
     }
 
     #[test]

@@ -1,1 +1,4 @@
-- AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible
+- AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible.
+- [x] Universal Password / Authentication Modal for Sudo, SSH VPS, Private Key Passphrase, Hardware Device PIN, Git credentials, and Host Verification.
+  - [x] Make sure password input dialog is general purpose and covers all edge cases (masking, unmasking, cursor navigation, Home/End, word delete, bracketed paste, `/dev/tty` fallback, zeroization).
+- [x] Agent of nsh password-driven commands: AskPass socket IPC integrated into `exec_cmd` and `run_ai_task_with_ui`, allowing password dialog to appear during agent execution, validating secrets, and continuing or halting gracefully.

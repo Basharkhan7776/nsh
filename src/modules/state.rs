@@ -1,5 +1,6 @@
 // State management for terminal shell application
 
+use super::askpass::{secure_wipe_string, AuthPromptType};
 use super::completions::update_suggestions;
 use super::config::{MAX_VISIBLE_SUGGESTIONS, VISIBLE_HISTORY_LINES};
 use crate::ai::ProviderType;
@@ -164,6 +165,37 @@ pub struct PlanSession {
     pub iteration: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct AuthModalState {
+    pub is_active: bool,
+    pub prompt_type: AuthPromptType,
+    pub title: String,
+    pub description: String,
+    pub prompt_label: String,
+    pub input_value: String,
+    pub cursor_pos: usize,
+    pub is_masked: bool,
+    pub error_message: Option<String>,
+    pub target_command: Option<String>,
+}
+
+impl Default for AuthModalState {
+    fn default() -> Self {
+        Self {
+            is_active: false,
+            prompt_type: AuthPromptType::GenericPassword,
+            title: "Authentication Required".to_string(),
+            description: String::new(),
+            prompt_label: "Password:".to_string(),
+            input_value: String::new(),
+            cursor_pos: 0,
+            is_masked: true,
+            error_message: None,
+            target_command: None,
+        }
+    }
+}
+
 // Application state
 pub struct App {
     pub entries: Vec<Entry>,                        // All history entries (screen rows)
@@ -190,11 +222,12 @@ pub struct App {
     pub focus: Focus,                               // Current focus: Input or Output
     pub selection: Option<Selection>,               // Active text selection in output
     pub status_message: Option<String>,             // Temporary status notification
-    pub show_sudo_prompt: bool,                     // Sudo password modal is active
+    pub show_sudo_prompt: bool,                     // Sudo password modal is active (legacy/compat)
     pub sudo_password: String,                      // Password input buffer (wiped on submit/cancel)
     pub pending_sudo_command: Option<String>,       // Original command waiting for sudo auth
     pub sudo_error: Option<String>,                 // Sudo auth error message
     pub sudo_prompt_mode: SudoPromptMode,           // Sudo prompt type (TuiModal / DesktopGui / Auto)
+    pub auth_modal: AuthModalState,                 // Universal authentication & password modal
     pub input_scroll_x: usize,                      // Horizontal scroll offset for input
     pub active_plan_session: Option<PlanSession>,   // Active interactive plan review session
     pub show_history_modal: bool,                   // Command history dialog modal is active
@@ -236,6 +269,7 @@ impl App {
             pending_sudo_command: None,
             sudo_error: None,
             sudo_prompt_mode: SudoPromptMode::default(),
+            auth_modal: AuthModalState::default(),
             input_scroll_x: 0,
             active_plan_session: None,
             show_history_modal: false,
@@ -252,17 +286,174 @@ impl App {
 
     // Securely wipe and reset sudo password state
     pub fn clear_sudo_state(&mut self) {
-        unsafe {
-            let vec = self.sudo_password.as_mut_vec();
-            for b in vec.iter_mut() {
-                *b = 0;
-            }
-        }
-        self.sudo_password.clear();
+        secure_wipe_string(&mut self.sudo_password);
         self.show_sudo_prompt = false;
         self.pending_sudo_command = None;
         self.sudo_error = None;
     }
+
+    /// Open universal authentication modal
+    pub fn open_auth_modal(
+        &mut self,
+        prompt_type: AuthPromptType,
+        title: &str,
+        description: &str,
+        label: &str,
+        is_masked: bool,
+        target_cmd: Option<String>,
+    ) {
+        secure_wipe_string(&mut self.auth_modal.input_value);
+        self.auth_modal = AuthModalState {
+            is_active: true,
+            prompt_type,
+            title: title.to_string(),
+            description: description.to_string(),
+            prompt_label: label.to_string(),
+            input_value: String::new(),
+            cursor_pos: 0,
+            is_masked,
+            error_message: None,
+            target_command: target_cmd.clone(),
+        };
+
+        if prompt_type == AuthPromptType::SudoPassword {
+            self.show_sudo_prompt = true;
+            self.pending_sudo_command = target_cmd;
+            self.sudo_password.clear();
+            self.sudo_error = None;
+        }
+    }
+
+    /// Close authentication modal and zeroize secret buffers
+    pub fn close_auth_modal(&mut self) {
+        secure_wipe_string(&mut self.auth_modal.input_value);
+        self.auth_modal.is_active = false;
+        self.auth_modal.cursor_pos = 0;
+        self.auth_modal.error_message = None;
+        self.auth_modal.target_command = None;
+        self.clear_sudo_state();
+    }
+
+    /// Handle character input in auth modal
+    pub fn auth_modal_input_char(&mut self, c: char) {
+        if self.auth_modal.cursor_pos <= self.auth_modal.input_value.len() {
+            self.auth_modal.input_value.insert(self.auth_modal.cursor_pos, c);
+            self.auth_modal.cursor_pos += c.len_utf8();
+            self.auth_modal.error_message = None;
+            if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+                self.sudo_password = self.auth_modal.input_value.clone();
+                self.sudo_error = None;
+            }
+        }
+    }
+
+    /// Handle backspace in auth modal
+    pub fn auth_modal_backspace(&mut self) {
+        if self.auth_modal.cursor_pos > 0 {
+            let prev_idx = self.auth_modal.input_value[..self.auth_modal.cursor_pos]
+                .char_indices()
+                .next_back()
+                .map(|(idx, _)| idx)
+                .unwrap_or(0);
+            self.auth_modal.input_value.remove(prev_idx);
+            self.auth_modal.cursor_pos = prev_idx;
+            self.auth_modal.error_message = None;
+            if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+                self.sudo_password = self.auth_modal.input_value.clone();
+                self.sudo_error = None;
+            }
+        }
+    }
+
+    /// Handle delete key in auth modal
+    pub fn auth_modal_delete(&mut self) {
+        if self.auth_modal.cursor_pos < self.auth_modal.input_value.len() {
+            self.auth_modal.input_value.remove(self.auth_modal.cursor_pos);
+            self.auth_modal.error_message = None;
+            if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+                self.sudo_password = self.auth_modal.input_value.clone();
+                self.sudo_error = None;
+            }
+        }
+    }
+
+    /// Move auth modal cursor left
+    pub fn auth_modal_cursor_left(&mut self) {
+        if self.auth_modal.cursor_pos > 0 {
+            if let Some((idx, _)) = self.auth_modal.input_value[..self.auth_modal.cursor_pos]
+                .char_indices()
+                .next_back()
+            {
+                self.auth_modal.cursor_pos = idx;
+            }
+        }
+    }
+
+    /// Move auth modal cursor right
+    pub fn auth_modal_cursor_right(&mut self) {
+        if self.auth_modal.cursor_pos < self.auth_modal.input_value.len() {
+            if let Some((_, ch)) = self.auth_modal.input_value[self.auth_modal.cursor_pos..]
+                .char_indices()
+                .next()
+            {
+                self.auth_modal.cursor_pos += ch.len_utf8();
+            }
+        }
+    }
+
+    /// Move auth modal cursor to beginning of line
+    pub fn auth_modal_cursor_home(&mut self) {
+        self.auth_modal.cursor_pos = 0;
+    }
+
+    /// Move auth modal cursor to end of line
+    pub fn auth_modal_cursor_end(&mut self) {
+        self.auth_modal.cursor_pos = self.auth_modal.input_value.len();
+    }
+
+    /// Clear input in auth modal (Ctrl+U)
+    pub fn auth_modal_clear_input(&mut self) {
+        secure_wipe_string(&mut self.auth_modal.input_value);
+        self.auth_modal.cursor_pos = 0;
+        self.auth_modal.error_message = None;
+        if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+            self.sudo_password.clear();
+            self.sudo_error = None;
+        }
+    }
+
+    /// Delete word backward in auth modal (Ctrl+W)
+    pub fn auth_modal_delete_word(&mut self) {
+        if self.auth_modal.cursor_pos == 0 {
+            return;
+        }
+        let s = &self.auth_modal.input_value[..self.auth_modal.cursor_pos];
+        let trimmed = s.trim_end();
+        let cut_idx = match trimmed.rfind(|c: char| c.is_whitespace() || c == '/' || c == '-' || c == '_') {
+            Some(idx) => idx + 1,
+            None => 0,
+        };
+        self.auth_modal.input_value.drain(cut_idx..self.auth_modal.cursor_pos);
+        self.auth_modal.cursor_pos = cut_idx;
+        self.auth_modal.error_message = None;
+        if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+            self.sudo_password = self.auth_modal.input_value.clone();
+            self.sudo_error = None;
+        }
+    }
+
+    /// Paste text into auth modal
+    pub fn auth_modal_paste(&mut self, text: &str) {
+        let clean = text.trim_end_matches(['\r', '\n']);
+        self.auth_modal.input_value.insert_str(self.auth_modal.cursor_pos, clean);
+        self.auth_modal.cursor_pos += clean.len();
+        self.auth_modal.error_message = None;
+        if self.auth_modal.prompt_type == AuthPromptType::SudoPassword {
+            self.sudo_password = self.auth_modal.input_value.clone();
+            self.sudo_error = None;
+        }
+    }
+
 
     // Open command history dialog modal
     pub fn open_history_modal(&mut self) {
@@ -858,4 +1049,58 @@ mod tests {
         assert!(!app.show_history_modal);
         assert_eq!(app.current_input, "git status");
     }
+
+    #[test]
+    fn test_auth_modal_lifecycle() {
+        let mut app = App::new();
+        assert!(!app.auth_modal.is_active);
+
+        // Open SSH Key Passphrase modal
+        app.open_auth_modal(
+            AuthPromptType::SshKeyPassphrase,
+            "SSH Key Passphrase",
+            "Key: ~/.ssh/id_ed25519",
+            "Passphrase:",
+            true,
+            Some("ssh user@vps".to_string()),
+        );
+        assert!(app.auth_modal.is_active);
+        assert_eq!(app.auth_modal.title, "SSH Key Passphrase");
+        assert_eq!(app.auth_modal.description, "Key: ~/.ssh/id_ed25519");
+        assert_eq!(app.auth_modal.prompt_label, "Passphrase:");
+        assert!(app.auth_modal.is_masked);
+
+        // Typing characters
+        app.auth_modal_input_char('s');
+        app.auth_modal_input_char('e');
+        app.auth_modal_input_char('c');
+        app.auth_modal_input_char('r');
+        app.auth_modal_input_char('e');
+        app.auth_modal_input_char('t');
+        assert_eq!(app.auth_modal.input_value, "secret");
+        assert_eq!(app.auth_modal.cursor_pos, 6);
+
+        // Cursor movement & deletion
+        app.auth_modal_cursor_left();
+        app.auth_modal_cursor_left();
+        assert_eq!(app.auth_modal.cursor_pos, 4);
+        app.auth_modal_backspace(); // deletes 'r'
+        assert_eq!(app.auth_modal.input_value, "secet");
+        assert_eq!(app.auth_modal.cursor_pos, 3);
+
+        // Paste support
+        app.auth_modal_paste("123");
+        assert_eq!(app.auth_modal.input_value, "sec123et");
+
+        // Clear input
+        app.auth_modal_clear_input();
+        assert_eq!(app.auth_modal.input_value, "");
+        assert_eq!(app.auth_modal.cursor_pos, 0);
+
+        // Close modal
+        app.close_auth_modal();
+        assert!(!app.auth_modal.is_active);
+        assert_eq!(app.auth_modal.input_value, "");
+    }
 }
+

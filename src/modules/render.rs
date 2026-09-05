@@ -25,8 +25,8 @@ pub fn render(
             render_settings(f, app);
         } else {
             render_shell(f, app);
-            if app.show_sudo_prompt {
-                render_sudo_password_modal(f, app);
+            if app.auth_modal.is_active || app.show_sudo_prompt {
+                render_auth_modal(f, app);
             } else if app.show_history_modal {
                 render_history_modal(f, app);
             }
@@ -491,6 +491,7 @@ fn render_shell(f: &mut ratatui::Frame, app: &mut App) {
     if app.ai_loading.is_none()
         && app.focus == super::state::Focus::Input
         && !app.show_sudo_prompt
+        && !app.auth_modal.is_active
         && !app.show_history_modal
     {
         let visible_cursor_offset = cursor_char_idx.saturating_sub(start_idx) as u16;
@@ -1216,12 +1217,12 @@ fn render_enable_page(f: &mut ratatui::Frame, app: &App, inner: Rect) {
     }
 }
 
-pub fn compute_sudo_modal_area(screen: Rect) -> Rect {
-    let target_w: u16 = 54;
-    let target_h: u16 = 9;
+pub fn compute_auth_modal_area(screen: Rect) -> Rect {
+    let target_w: u16 = (screen.width as f32 * 0.70) as u16;
+    let target_h: u16 = 11;
 
-    let width = target_w.min(screen.width.saturating_sub(4)).max(32);
-    let height = target_h.min(screen.height.saturating_sub(2)).max(7);
+    let width = target_w.clamp(52, 86).min(screen.width.saturating_sub(4));
+    let height = target_h.min(screen.height.saturating_sub(2)).max(8);
 
     let x = (screen.width.saturating_sub(width)) / 2;
     let y = (screen.height.saturating_sub(height)) / 2;
@@ -1229,8 +1230,12 @@ pub fn compute_sudo_modal_area(screen: Rect) -> Rect {
     Rect::new(x, y, width, height)
 }
 
-pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
-    let modal_area = compute_sudo_modal_area(f.area());
+pub fn compute_sudo_modal_area(screen: Rect) -> Rect {
+    compute_auth_modal_area(screen)
+}
+
+pub fn render_auth_modal(f: &mut ratatui::Frame, app: &App) {
+    let modal_area = compute_auth_modal_area(f.area());
 
     // Clear cells underneath so background text doesn't bleed through
     f.render_widget(Clear, modal_area);
@@ -1243,13 +1248,25 @@ pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
     f.render_widget(block, modal_area);
 
     // Title on top border (no emojis, white, clean)
+    let raw_title = if !app.auth_modal.title.is_empty() {
+        &app.auth_modal.title
+    } else {
+        "Authentication Required"
+    };
     let title_line = Line::from(Span::styled(
-        " Authentication Required ",
+        format!(" {} ", raw_title),
         Style::default().fg(Color::White),
     ));
     f.render_widget(
         Paragraph::new(title_line),
-        Rect::new(modal_area.x + 2, modal_area.y, modal_area.width.saturating_sub(4), 1),
+        Rect::new(modal_area.x + 2, modal_area.y, modal_area.width.saturating_sub(15), 1),
+    );
+
+    // Top-right close button
+    let close_hint = "[Esc Cancel]";
+    f.render_widget(
+        Paragraph::new(close_hint).style(Style::default().fg(Color::DarkGray)),
+        Rect::new(modal_area.x + modal_area.width.saturating_sub(13), modal_area.y, 12, 1),
     );
 
     let inner = Rect::new(
@@ -1259,34 +1276,57 @@ pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
         modal_area.height.saturating_sub(2),
     );
 
-    let cmd_raw = app.pending_sudo_command.as_deref().unwrap_or("sudo");
-    let max_cmd_len = inner.width.saturating_sub(12) as usize;
-    let cmd_display = if cmd_raw.len() > max_cmd_len && max_cmd_len > 3 {
-        format!("{}...", &cmd_raw[..max_cmd_len - 3])
+    // Description text
+    let description = if !app.auth_modal.description.is_empty() {
+        app.auth_modal.description.clone()
+    } else if let Some(cmd) = &app.pending_sudo_command {
+        format!("Command: {}", cmd)
     } else {
-        cmd_raw.to_string()
+        let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
+        format!("User: {}", user)
     };
 
-    let user = std::env::var("USER").unwrap_or_else(|_| "root".to_string());
-    let bullets = "•".repeat(app.sudo_password.chars().count());
+    let label = if !app.auth_modal.prompt_label.is_empty() {
+        &app.auth_modal.prompt_label
+    } else {
+        "Password:"
+    };
+
+    let secret_val = if !app.auth_modal.input_value.is_empty() {
+        &app.auth_modal.input_value
+    } else {
+        &app.sudo_password
+    };
+
+    let is_masked = app.auth_modal.is_masked;
+    let display_input = if is_masked {
+        "•".repeat(secret_val.chars().count())
+    } else {
+        secret_val.clone()
+    };
+
+    let err_opt = app.auth_modal.error_message.as_ref().or(app.sudo_error.as_ref());
+
+    let max_desc_len = (inner.width as usize).saturating_sub(2);
+    let desc_display = if description.chars().count() > max_desc_len && max_desc_len > 3 {
+        let s: String = description.chars().take(max_desc_len - 3).collect();
+        format!("{}...", s)
+    } else {
+        description
+    };
 
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("Command:  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(cmd_display, Style::default().fg(Color::White)),
+            Span::styled(desc_display, Style::default().fg(Color::White)),
         ]),
+        Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::DarkGray))),
         Line::from(vec![
-            Span::styled("User:     ", Style::default().fg(Color::DarkGray)),
-            Span::styled(user, Style::default().fg(Color::White)),
-        ]),
-        Line::from(Span::raw("")),
-        Line::from(vec![
-            Span::styled("Password: ", Style::default().fg(Color::White)),
-            Span::styled(bullets, Style::default().fg(Color::White)),
+            Span::styled(format!("{:<12} ", label), Style::default().fg(Color::White)),
+            Span::styled(display_input, Style::default().fg(Color::White)),
         ]),
     ];
 
-    if let Some(err) = &app.sudo_error {
+    if let Some(err) = err_opt {
         lines.push(Line::from(Span::styled(
             format!(" {}", err),
             Style::default().fg(Color::Rgb(220, 80, 80)),
@@ -1304,14 +1344,23 @@ pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
 
     f.render_widget(Paragraph::new(lines).style(output_bg), inner);
 
-    // Position the real terminal cursor at the end of the password bullets
-    let pass_len = app.sudo_password.chars().count() as u16;
-    let cursor_x = (inner.x + 10 + pass_len).min(inner.x + inner.width.saturating_sub(1));
-    let cursor_y = inner.y + 3;
+    // Position terminal cursor at typed position
+    let cursor_char_offset = if is_masked {
+        app.auth_modal.cursor_pos.min(secret_val.chars().count())
+    } else {
+        secret_val[..app.auth_modal.cursor_pos.min(secret_val.len())].chars().count()
+    } as u16;
+
+    let cursor_x = (inner.x + 13 + cursor_char_offset).min(inner.x + inner.width.saturating_sub(1));
+    let cursor_y = inner.y + 2;
     f.set_cursor_position(Position {
         x: cursor_x,
         y: cursor_y,
     });
+}
+
+pub fn render_sudo_password_modal(f: &mut ratatui::Frame, app: &App) {
+    render_auth_modal(f, app);
 }
 
 pub fn compute_history_modal_area(screen: Rect) -> Rect {
@@ -1727,10 +1776,10 @@ mod tests {
     fn test_compute_sudo_modal_area() {
         let screen = Rect::new(0, 0, 100, 30);
         let area = compute_sudo_modal_area(screen);
-        assert_eq!(area.width, 54);
-        assert_eq!(area.height, 9);
-        assert_eq!(area.x, (100 - 54) / 2);
-        assert_eq!(area.y, (30 - 9) / 2);
+        assert_eq!(area.width, 70);
+        assert_eq!(area.height, 11);
+        assert_eq!(area.x, (100 - 70) / 2);
+        assert_eq!(area.y, (30 - 11) / 2);
 
         // Small screen clamping
         let small = Rect::new(0, 0, 40, 10);
@@ -1757,13 +1806,111 @@ mod tests {
         let buffer = terminal.backend().buffer();
         let text = format!("{:?}", buffer);
         assert!(text.contains("Authentication Required"));
-        assert!(text.contains("Command:"));
         assert!(text.contains("sudo apt update"));
         assert!(text.contains("Password:"));
         // Check that bullets are rendered
         assert!(text.contains("••••••••••"));
         assert!(text.contains("[Enter]"));
         assert!(text.contains("[Esc]"));
+    }
+
+    #[test]
+    fn test_render_auth_modal_ssh_key_passphrase() {
+        use crate::modules::askpass::AuthPromptType;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_auth_modal(
+            AuthPromptType::SshKeyPassphrase,
+            "SSH Key Passphrase",
+            "Key: ~/.ssh/id_ed25519",
+            "Passphrase:",
+            true,
+            Some("ssh user@vps".to_string()),
+        );
+        app.auth_modal_input_char('k');
+        app.auth_modal_input_char('e');
+        app.auth_modal_input_char('y');
+
+        terminal
+            .draw(|f| {
+                render_auth_modal(f, &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("SSH Key Passphrase"));
+        assert!(text.contains("~/.ssh/id_ed25519"));
+        assert!(text.contains("Passphrase:"));
+        assert!(text.contains("•••"));
+        assert!(text.contains("[Esc Cancel]"));
+    }
+
+    #[test]
+    fn test_render_auth_modal_device_pin() {
+        use crate::modules::askpass::AuthPromptType;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_auth_modal(
+            AuthPromptType::DevicePin,
+            "Device Security PIN",
+            "Authenticator PIN required",
+            "PIN:",
+            true,
+            None,
+        );
+        app.auth_modal_input_char('1');
+        app.auth_modal_input_char('2');
+        app.auth_modal_input_char('3');
+        app.auth_modal_input_char('4');
+
+        terminal
+            .draw(|f| {
+                render_auth_modal(f, &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("Device Security PIN"));
+        assert!(text.contains("Authenticator PIN required"));
+        assert!(text.contains("PIN:"));
+        assert!(text.contains("••••"));
+    }
+
+    #[test]
+    fn test_render_auth_modal_host_verification_unmasked() {
+        use crate::modules::askpass::AuthPromptType;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+        app.open_auth_modal(
+            AuthPromptType::HostVerification,
+            "Host Key Verification",
+            "Host: 192.168.1.50 (SHA256:...)",
+            "Continue (yes/no):",
+            false,
+            None,
+        );
+        app.auth_modal_input_char('y');
+        app.auth_modal_input_char('e');
+        app.auth_modal_input_char('s');
+
+        terminal
+            .draw(|f| {
+                render_auth_modal(f, &app);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let text = format!("{:?}", buffer);
+        assert!(text.contains("Host Key Verification"));
+        assert!(text.contains("192.168.1.50"));
+        assert!(text.contains("Continue (yes/no):"));
+        // Unmasked: should contain "yes" explicitly
+        assert!(text.contains("yes"));
     }
 
     #[test]

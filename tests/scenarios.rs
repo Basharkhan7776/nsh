@@ -28,6 +28,12 @@ use nsh::tools::{
     cat, copy_path, delete_path, edit_file, execute_tool, get_tool_definitions, grep, ls,
     mkdir, move_path, touch, write_file,
 };
+use nsh::{
+    classify_prompt, compute_auth_modal_area, render_auth_modal, secure_wipe_string,
+    AskPassServer, AuthPromptType,
+};
+use ratatui::backend::TestBackend;
+use ratatui::Terminal;
 
 /// RAII helper for creating and safely removing isolated temporary directories.
 struct TempDirGuard {
@@ -1077,4 +1083,243 @@ fn scenario_13_history_modal_workflow() {
     app.history_modal_confirm();
     assert!(!app.show_history_modal);
     assert_eq!(app.current_input, "git status");
+}
+
+// -----------------------------------------------------------------------------
+// Scenario 14: Universal Authentication and SSH Password/Passphrase Workflow
+// -----------------------------------------------------------------------------
+
+#[test]
+fn scenario_14_prompt_classification_and_masking() {
+    // SSH VPS password prompt
+    let (pt, title, desc, label, masked) = classify_prompt("root@192.168.1.100's password: ");
+    assert_eq!(pt, AuthPromptType::SshPassword);
+    assert_eq!(title, "SSH Authentication");
+    assert_eq!(desc, "Host: root@192.168.1.100");
+    assert_eq!(label, "Password:");
+    assert!(masked);
+
+    // SSH key passphrase prompt
+    let (pt, title, desc, label, masked) =
+        classify_prompt("Enter passphrase for key '/home/user/.ssh/id_ed25519': ");
+    assert_eq!(pt, AuthPromptType::SshKeyPassphrase);
+    assert_eq!(title, "SSH Key Passphrase");
+    assert_eq!(desc, "Key: /home/user/.ssh/id_ed25519");
+    assert_eq!(label, "Passphrase:");
+    assert!(masked);
+
+    // Device / authenticator PIN prompt
+    let (pt, title, desc, label, masked) = classify_prompt("Enter PIN for authenticator: ");
+    assert_eq!(pt, AuthPromptType::DevicePin);
+    assert_eq!(title, "Device Security PIN");
+    assert_eq!(desc, "Enter PIN for authenticator:");
+    assert_eq!(label, "PIN:");
+    assert!(masked);
+
+    // Host key verification (unmasked text!)
+    let (pt, title, desc, label, masked) = classify_prompt(
+        "The authenticity of host 'github.com (140.82.121.4)' can't be established. Are you sure you want to continue connecting (yes/no/[fingerprint])? ",
+    );
+    assert_eq!(pt, AuthPromptType::HostVerification);
+    assert_eq!(title, "Host Key Verification");
+    assert!(desc.contains("github.com"));
+    assert_eq!(label, "Continue (yes/no):");
+    assert!(!masked);
+
+    // Git username (unmasked) and password (masked)
+    let (pt_u, title_u, _desc_u, label_u, masked_u) =
+        classify_prompt("Username for 'https://github.com': ");
+    assert_eq!(pt_u, AuthPromptType::GitCredentials);
+    assert_eq!(title_u, "Git Authentication");
+    assert_eq!(label_u, "Username:");
+    assert!(!masked_u);
+
+    let (pt_p, title_p, _desc_p, label_p, masked_p) =
+        classify_prompt("Password for 'https://alice@github.com': ");
+    assert_eq!(pt_p, AuthPromptType::GitCredentials);
+    assert_eq!(title_p, "Git Authentication");
+    assert_eq!(label_p, "Password:");
+    assert!(masked_p);
+
+    // Sudo password prompt
+    let (pt, title, desc, label, masked) = classify_prompt("[sudo] password for devops: ");
+    assert_eq!(pt, AuthPromptType::SudoPassword);
+    assert_eq!(title, "Authentication Required");
+    assert_eq!(desc, "User: devops");
+    assert_eq!(label, "Password:");
+    assert!(masked);
+}
+
+#[test]
+fn scenario_14_auth_modal_state_and_line_editing() {
+    let mut app = App::new();
+    assert!(!app.auth_modal.is_active);
+
+    // Open modal
+    app.open_auth_modal(
+        AuthPromptType::SshPassword,
+        "SSH Authentication",
+        "user@vps.internal",
+        "Password:",
+        true,
+        None,
+    );
+    assert!(app.auth_modal.is_active);
+    assert_eq!(app.auth_modal.title, "SSH Authentication");
+    assert_eq!(app.auth_modal.input_value, "");
+    assert_eq!(app.auth_modal.cursor_pos, 0);
+
+    // Typing characters
+    for ch in "secret123".chars() {
+        app.auth_modal_input_char(ch);
+    }
+    assert_eq!(app.auth_modal.input_value, "secret123");
+    assert_eq!(app.auth_modal.cursor_pos, 9);
+
+    // Backspace
+    app.auth_modal_backspace();
+    assert_eq!(app.auth_modal.input_value, "secret12");
+    assert_eq!(app.auth_modal.cursor_pos, 8);
+
+    // Cursor navigation
+    app.auth_modal_cursor_left();
+    app.auth_modal_cursor_left();
+    assert_eq!(app.auth_modal.cursor_pos, 6);
+
+    // Mid-line insert
+    app.auth_modal_input_char('X');
+    assert_eq!(app.auth_modal.input_value, "secretX12");
+    assert_eq!(app.auth_modal.cursor_pos, 7);
+
+    // Delete forward
+    app.auth_modal_delete();
+    assert_eq!(app.auth_modal.input_value, "secretX2");
+    assert_eq!(app.auth_modal.cursor_pos, 7);
+
+    // Home and End
+    app.auth_modal_cursor_home();
+    assert_eq!(app.auth_modal.cursor_pos, 0);
+    app.auth_modal_cursor_end();
+    assert_eq!(app.auth_modal.cursor_pos, app.auth_modal.input_value.len());
+
+    // Word delete (Ctrl+W)
+    app.auth_modal_delete_word();
+    assert_eq!(app.auth_modal.input_value, "");
+    assert_eq!(app.auth_modal.cursor_pos, 0);
+
+    // Bracketed paste
+    app.auth_modal_paste("p@ssw0rd!_phrase\r\n");
+    assert_eq!(app.auth_modal.input_value, "p@ssw0rd!_phrase");
+
+    // Clear line (Ctrl+U)
+    app.auth_modal_clear_input();
+    assert_eq!(app.auth_modal.input_value, "");
+
+    // Close modal
+    app.close_auth_modal();
+    assert!(!app.auth_modal.is_active);
+}
+
+#[test]
+fn scenario_14_auth_modal_rendering_and_layout() {
+    // Clamping checks
+    let area_small = ratatui::layout::Rect::new(0, 0, 40, 20);
+    let modal_small = compute_auth_modal_area(area_small);
+    assert_eq!(modal_small.width, 36);
+
+    let area_standard = ratatui::layout::Rect::new(0, 0, 120, 40);
+    let modal_standard = compute_auth_modal_area(area_standard);
+    assert!(modal_standard.width >= 52 && modal_standard.width <= 86);
+
+    // Ratatui test backend rendering
+    let backend = TestBackend::new(80, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    let mut app = App::new();
+    app.open_auth_modal(
+        AuthPromptType::SshKeyPassphrase,
+        "SSH Key Passphrase",
+        "Key: /home/bashar-khan/.ssh/id_ed25519",
+        "Passphrase:",
+        true,
+        None,
+    );
+    app.auth_modal_paste("mypassword");
+    app.auth_modal.error_message = Some("Incorrect passphrase, try again".to_string());
+
+    terminal
+        .draw(|f| {
+            render_auth_modal(f, &app);
+        })
+        .unwrap();
+
+    let buffer = terminal.backend().buffer();
+    let rendered_text = format!("{:?}", buffer);
+
+    assert!(rendered_text.contains("SSH Key Passphrase"));
+    assert!(rendered_text.contains("[Esc Cancel]"));
+    assert!(rendered_text.contains("••••••••••"));
+    assert!(rendered_text.contains("Incorrect passphrase, try again"));
+    assert!(rendered_text.contains("[Enter] Submit"));
+}
+
+#[test]
+fn scenario_14_ssh_command_classification() {
+    // Remote interactive shell is fullscreen TUI (suspends TUI)
+    assert!(is_fullscreen_tui("ssh user@vps"));
+    assert!(is_fullscreen_tui("ssh -i ~/.ssh/id_rsa root@10.0.0.1"));
+
+    // Remote batch/streaming command execution stays inside nsh output screen (NOT fullscreen)
+    assert!(!is_fullscreen_tui("ssh user@vps uptime"));
+    assert!(!is_fullscreen_tui("ssh user@vps ls -la /var/log"));
+    assert!(!is_fullscreen_tui("ssh -p 2222 root@myserver docker ps"));
+
+    // scp, sftp, ssh-copy-id stay inside nsh output screen (NOT fullscreen)
+    assert!(!is_fullscreen_tui("scp index.html user@vps:/var/www"));
+    assert!(!is_fullscreen_tui("sftp user@vps"));
+    assert!(!is_fullscreen_tui("ssh-copy-id user@vps"));
+}
+
+#[test]
+fn scenario_14_askpass_ipc_roundtrip_and_zeroization() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::UnixStream;
+
+    let (server, rx) = AskPassServer::start().expect("failed to start askpass server");
+    let socket_path = server.socket_path.clone();
+    assert!(socket_path.exists());
+
+    let client_handle = std::thread::spawn(move || {
+        let mut stream = UnixStream::connect(&socket_path).expect("client connect failed");
+        stream
+            .write_all(b"Enter passphrase for key '/home/user/.ssh/id_rsa': \n")
+            .unwrap();
+        stream.flush().unwrap();
+
+        let mut reader = BufReader::new(stream);
+        let mut response = String::new();
+        reader.read_line(&mut response).expect("read response");
+        response
+    });
+
+    let event = rx
+        .recv_timeout(std::time::Duration::from_secs(3))
+        .expect("server event received");
+    assert_eq!(event.prompt_type, AuthPromptType::SshKeyPassphrase);
+    assert_eq!(event.label, "Passphrase:");
+    assert!(event.is_masked);
+
+    // Send secret from auth modal response channel
+    event
+        .response_tx
+        .send(Some("super_secret_ssh_pass".to_string()))
+        .unwrap();
+
+    let client_received = client_handle.join().expect("client thread join");
+    assert_eq!(client_received.trim(), "super_secret_ssh_pass");
+
+    // Test zeroization
+    let mut sensitive = "highly_confidential_key".to_string();
+    secure_wipe_string(&mut sensitive);
+    assert!(sensitive.is_empty());
 }
