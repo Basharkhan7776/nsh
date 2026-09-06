@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
@@ -18,6 +18,26 @@ pub fn secure_wipe_string(s: &mut String) {
         }
     }
     s.clear();
+}
+
+static GLOBAL_ASKPASS_SOCKET: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Return the active AskPass Unix domain socket path if running
+pub fn get_active_askpass_socket() -> Option<PathBuf> {
+    if let Ok(guard) = GLOBAL_ASKPASS_SOCKET.read() {
+        if let Some(ref path) = *guard {
+            if path.exists() {
+                return Some(path.clone());
+            }
+        }
+    }
+    if let Ok(socket) = std::env::var("NSH_ASKPASS_SOCKET") {
+        let p = PathBuf::from(socket);
+        if p.exists() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,7 +120,7 @@ pub fn classify_prompt(prompt: &str) -> (AuthPromptType, String, String, String,
     }
 
     // 4. Sudo password
-    if lower.starts_with("[sudo] password for") || lower.starts_with("password for root") {
+    if lower.contains("[sudo]") || lower.starts_with("password for root") {
         let user = if let Some(idx) = lower.find("for ") {
             let rest = &trimmed[idx + 4..];
             let end = rest.find(':').unwrap_or(rest.len());
@@ -247,6 +267,10 @@ impl AskPassServer {
             std::env::set_var("NSH_ASKPASS_SOCKET", &socket_path_str);
         }
 
+        if let Ok(mut guard) = GLOBAL_ASKPASS_SOCKET.write() {
+            *guard = Some(socket_path.clone());
+        }
+
         Ok((
             Self {
                 socket_path,
@@ -303,6 +327,9 @@ impl Drop for AskPassServer {
         }
         unsafe {
             std::env::remove_var("NSH_ASKPASS_SOCKET");
+        }
+        if let Ok(mut guard) = GLOBAL_ASKPASS_SOCKET.write() {
+            *guard = None;
         }
     }
 }
@@ -383,11 +410,12 @@ pub fn prompt_tty_fallback(prompt: &str) -> Option<String> {
 
 /// Client routine executed when nsh is invoked as an askpass handler.
 pub fn run_askpass_client(prompt: &str) -> std::process::ExitCode {
-    if let Ok(socket_path) = std::env::var("NSH_ASKPASS_SOCKET") {
-        if Path::new(&socket_path).exists() {
+    let clean_prompt = prompt.replace(['\r', '\n'], " ");
+    if let Some(socket_path) = get_active_askpass_socket() {
+        if socket_path.exists() {
             if let Ok(mut stream) = UnixStream::connect(&socket_path) {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(120)));
-                let _ = stream.write_all(prompt.as_bytes());
+                let _ = stream.write_all(clean_prompt.as_bytes());
                 let _ = stream.write_all(b"\n");
                 let _ = stream.flush();
 

@@ -1292,18 +1292,48 @@ pub fn render_auth_modal(f: &mut ratatui::Frame, app: &App) {
         "Password:"
     };
 
-    let secret_val = if !app.auth_modal.input_value.is_empty() {
-        &app.auth_modal.input_value
+    let (secret_val, is_masked, cursor_pos) = if app.auth_modal.is_active {
+        (
+            app.auth_modal.input_value.as_str(),
+            app.auth_modal.is_masked,
+            app.auth_modal.cursor_pos,
+        )
     } else {
-        &app.sudo_password
+        (
+            app.sudo_password.as_str(),
+            true,
+            app.sudo_password.len(),
+        )
     };
 
-    let is_masked = app.auth_modal.is_masked;
+    let label_str = format!("{} ", label);
+    let label_width = label_str.chars().count() as u16;
+
+    let safe_byte = if secret_val.is_char_boundary(cursor_pos.min(secret_val.len())) {
+        cursor_pos.min(secret_val.len())
+    } else {
+        secret_val.len()
+    };
+    let cursor_char_pos = secret_val[..safe_byte].chars().count();
+
     let display_input = if is_masked {
         "•".repeat(secret_val.chars().count())
     } else {
-        secret_val.clone()
+        secret_val.to_string()
     };
+
+    let avail_input_width = (inner.width as usize).saturating_sub(label_width as usize).max(1);
+    let scroll_offset = if cursor_char_pos >= avail_input_width {
+        cursor_char_pos.saturating_sub(avail_input_width).saturating_add(1)
+    } else {
+        0
+    };
+
+    let visible_input: String = display_input
+        .chars()
+        .skip(scroll_offset)
+        .take(avail_input_width)
+        .collect();
 
     let err_opt = app.auth_modal.error_message.as_ref().or(app.sudo_error.as_ref());
 
@@ -1321,8 +1351,8 @@ pub fn render_auth_modal(f: &mut ratatui::Frame, app: &App) {
         ]),
         Line::from(Span::styled("─".repeat(inner.width as usize), Style::default().fg(Color::DarkGray))),
         Line::from(vec![
-            Span::styled(format!("{:<12} ", label), Style::default().fg(Color::White)),
-            Span::styled(display_input, Style::default().fg(Color::White)),
+            Span::styled(label_str, Style::default().fg(Color::White)),
+            Span::styled(visible_input, Style::default().fg(Color::White)),
         ]),
     ];
 
@@ -1344,14 +1374,9 @@ pub fn render_auth_modal(f: &mut ratatui::Frame, app: &App) {
 
     f.render_widget(Paragraph::new(lines).style(output_bg), inner);
 
-    // Position terminal cursor at typed position
-    let cursor_char_offset = if is_masked {
-        app.auth_modal.cursor_pos.min(secret_val.chars().count())
-    } else {
-        secret_val[..app.auth_modal.cursor_pos.min(secret_val.len())].chars().count()
-    } as u16;
-
-    let cursor_x = (inner.x + 13 + cursor_char_offset).min(inner.x + inner.width.saturating_sub(1));
+    // Position terminal cursor directly on typed position
+    let visible_cursor_offset = cursor_char_pos.saturating_sub(scroll_offset) as u16;
+    let cursor_x = (inner.x + label_width + visible_cursor_offset).min(inner.x + inner.width.saturating_sub(1));
     let cursor_y = inner.y + 2;
     f.set_cursor_position(Position {
         x: cursor_x,
@@ -1911,6 +1936,71 @@ mod tests {
         assert!(text.contains("Continue (yes/no):"));
         // Unmasked: should contain "yes" explicitly
         assert!(text.contains("yes"));
+    }
+
+    #[test]
+    fn test_render_auth_modal_cursor_alignment() {
+        use crate::modules::askpass::AuthPromptType;
+        use ratatui::layout::Position;
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new();
+
+        let modal_area = compute_auth_modal_area(Rect::new(0, 0, 80, 20));
+        let inner_x = modal_area.x + 2;
+        let inner_y = modal_area.y + 1;
+
+        // Case 1: Standard clean "Password:" label
+        app.open_auth_modal(
+            AuthPromptType::SudoPassword,
+            "Authentication Required",
+            "Command: sudo apt update",
+            "Password:",
+            true,
+            None,
+        );
+
+        terminal.draw(|f| render_auth_modal(f, &app)).unwrap();
+        let label_width = "Password: ".len() as u16;
+        let expected_pos_empty = Position { x: inner_x + label_width, y: inner_y + 2 };
+        assert_eq!(terminal.get_cursor_position().unwrap(), expected_pos_empty);
+
+        // Type 5 characters
+        for c in "hello".chars() {
+            app.auth_modal_input_char(c);
+        }
+        terminal.draw(|f| render_auth_modal(f, &app)).unwrap();
+        let expected_pos_typed = Position { x: inner_x + label_width + 5, y: inner_y + 2 };
+        assert_eq!(terminal.get_cursor_position().unwrap(), expected_pos_typed);
+
+        // Move cursor left by 2 characters
+        app.auth_modal_cursor_left();
+        app.auth_modal_cursor_left();
+        terminal.draw(|f| render_auth_modal(f, &app)).unwrap();
+        let expected_pos_left = Position { x: inner_x + label_width + 3, y: inner_y + 2 };
+        assert_eq!(terminal.get_cursor_position().unwrap(), expected_pos_left);
+
+        // Case 2: Long label (like "[sudo] password for bashar-khan:")
+        let long_label = "[sudo] password for bashar-khan:";
+        app.open_auth_modal(
+            AuthPromptType::SudoPassword,
+            "Authentication Required",
+            "Command: sudo reboot",
+            long_label,
+            true,
+            None,
+        );
+        terminal.draw(|f| render_auth_modal(f, &app)).unwrap();
+        let long_label_width = format!("{} ", long_label).len() as u16;
+        let expected_long_empty = Position { x: inner_x + long_label_width, y: inner_y + 2 };
+        assert_eq!(terminal.get_cursor_position().unwrap(), expected_long_empty);
+
+        for c in "secret".chars() {
+            app.auth_modal_input_char(c);
+        }
+        terminal.draw(|f| render_auth_modal(f, &app)).unwrap();
+        let expected_long_typed = Position { x: inner_x + long_label_width + 6, y: inner_y + 2 };
+        assert_eq!(terminal.get_cursor_position().unwrap(), expected_long_typed);
     }
 
     #[test]

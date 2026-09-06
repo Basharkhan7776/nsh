@@ -247,6 +247,17 @@ fn run_live_command_in_ui(
     }
     if let Some(sock) = askpass_socket {
         nsh::inject_askpass_env(&mut cmd, sock);
+    } else if let Some(sock) = nsh::get_active_askpass_socket() {
+        nsh::inject_askpass_env(&mut cmd, &sock);
+    }
+
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
     }
 
     cmd.stdin(Stdio::piped())
@@ -733,7 +744,12 @@ fn run_ai_task_with_ui(
         render(terminal, app)?;
 
         let mut user_cancelled = false;
-        while event::poll(std::time::Duration::from_millis(0)).unwrap_or(false) {
+        let poll_dur = if app.auth_modal.is_active {
+            std::time::Duration::from_millis(50)
+        } else {
+            std::time::Duration::from_millis(0)
+        };
+        while event::poll(poll_dur).unwrap_or(false) {
             if let Ok(ev) = event::read() {
                 match ev {
                     Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -783,8 +799,12 @@ fn run_ai_task_with_ui(
                                 }
                                 KeyCode::Enter => {
                                     let secret = std::mem::take(&mut app.auth_modal.input_value);
+                                    let is_sudo = app.auth_modal.prompt_type == nsh::AuthPromptType::SudoPassword;
                                     if let Some(tx) = active_auth_response_tx.take() {
-                                        let _ = tx.send(Some(secret));
+                                        let _ = tx.send(Some(secret.clone()));
+                                    }
+                                    if is_sudo {
+                                        let _ = nsh::validate_and_cache_sudo_password(&secret);
                                     }
                                     app.close_auth_modal();
                                 }
@@ -831,7 +851,9 @@ fn run_ai_task_with_ui(
             break;
         }
 
-        std::thread::sleep(std::time::Duration::from_millis(50));
+        if !app.auth_modal.is_active {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     if app.auth_modal.is_active {
@@ -858,12 +880,14 @@ fn main() -> std::io::Result<()> {
                 _ => 1,
             };
             std::process::exit(code);
-        } else if std::env::var("NSH_ASKPASS_SOCKET").is_ok()
-            || args[1].to_lowercase().contains("password")
-            || args[1].to_lowercase().contains("passphrase")
-            || args[1].to_lowercase().contains("pin")
-            || args[1].to_lowercase().contains("continue connecting")
-            || args[1].to_lowercase().contains("authenticity of host")
+        } else if !args[1].starts_with('-')
+            && (std::env::var("NSH_ASKPASS_SOCKET").is_ok()
+                || nsh::get_active_askpass_socket().is_some()
+                || args[1].to_lowercase().contains("password")
+                || args[1].to_lowercase().contains("passphrase")
+                || args[1].to_lowercase().contains("pin")
+                || args[1].to_lowercase().contains("continue connecting")
+                || args[1].to_lowercase().contains("authenticity of host"))
         {
             let prompt = &args[1];
             let code = match nsh::run_askpass_client(prompt) {
@@ -1409,12 +1433,11 @@ fn main() -> std::io::Result<()> {
 
                                                     if !handled_via_gui {
                                                         app.pending_sudo_command = Some(input.clone());
-                                                        let current_user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
                                                         app.open_auth_modal(
                                                             nsh::AuthPromptType::SudoPassword,
                                                             "Authentication Required",
                                                             &format!("Command: {}", input.trim()),
-                                                            &format!("[sudo] password for {}:", current_user),
+                                                            "Password:",
                                                             true,
                                                             None,
                                                         );

@@ -10,8 +10,8 @@ pub mod rag;
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
 pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
 pub use modules::askpass::{
-    classify_prompt, run_askpass_client, secure_wipe_string, AskPassPromptEvent, AskPassServer,
-    AuthPromptType,
+    classify_prompt, get_active_askpass_socket, run_askpass_client, secure_wipe_string,
+    AskPassPromptEvent, AskPassServer, AuthPromptType,
 };
 pub use modules::commands::{
     clean_interactive_input, command_needs_sudo_password, execute_command,
@@ -36,4 +36,7 @@ pub use modules::state::{
 };
 pub use rag::{Document, RagEngine, RagError};
 pub use storage::{LocalStorage, NshConfig, StorageError, VectorError, VectorStore};
-pub use tools::{cat, copy_path, delete_path, execute_tool, get_tool_definitions, grep, ls, mkdir, move_path, web_search, write_file};
+pub use tools::{
+    cat, copy_path, delete_path, exec_cmd, execute_tool, get_tool_definitions, grep, ls, mkdir,
+    move_path, web_search, write_file,
+};

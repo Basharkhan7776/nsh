@@ -1337,6 +1337,7 @@ dependencies = [
  "async-trait",
  "crossterm",
  "dirs",
+ "libc",
  "log",
  "qdrant-client",
  "ratatui",

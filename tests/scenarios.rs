@@ -25,7 +25,7 @@ use nsh::modules::completions::{
 use nsh::modules::keybindings::{execute_action, get_action, Action};
 use nsh::modules::state::{App, Entry, EntryType, PlanSession};
 use nsh::tools::{
-    cat, copy_path, delete_path, edit_file, execute_tool, get_tool_definitions, grep, ls,
+    cat, copy_path, delete_path, edit_file, exec_cmd, execute_tool, get_tool_definitions, grep, ls,
     mkdir, move_path, touch, write_file,
 };
 use nsh::{
@@ -1323,3 +1323,32 @@ fn scenario_14_askpass_ipc_roundtrip_and_zeroization() {
     secure_wipe_string(&mut sensitive);
     assert!(sensitive.is_empty());
 }
+
+#[test]
+fn scenario_15_agent_exec_cmd_triggers_askpass_ipc() {
+    let (server, rx) = AskPassServer::start().expect("failed to start askpass server");
+    assert!(server.socket_path.exists());
+
+    // Spawn a responder thread simulating the UI answering the password prompt
+    let responder = std::thread::spawn(move || {
+        let event = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("server received prompt event");
+        assert_eq!(event.prompt_type, AuthPromptType::SudoPassword);
+        assert_eq!(event.label, "Password:");
+        assert!(event.is_masked);
+
+        event
+            .response_tx
+            .send(Some("authenticated_sudo_pass".to_string()))
+            .unwrap();
+    });
+
+    // Run exec_cmd with a command that invokes the askpass helper
+    let out = exec_cmd(r#"sh -c '"$SUDO_ASKPASS" "[sudo] password for bashar-khan:"'"#)
+        .expect("exec_cmd failed");
+    assert_eq!(out.trim(), "authenticated_sudo_pass");
+
+    responder.join().expect("responder joined");
+}
+

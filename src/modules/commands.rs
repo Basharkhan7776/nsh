@@ -739,7 +739,16 @@ pub fn prompt_gui_password(title: &str) -> Option<String> {
 
 /// Inject OpenSSH, Git, and Sudo AskPass environment variables pointing to nsh
 pub fn inject_askpass_env(cmd: &mut std::process::Command, socket_path: &std::path::Path) {
-    if let Ok(exe) = std::env::current_exe() {
+    if let Ok(mut exe) = std::env::current_exe() {
+        // If running inside test runner binary (e.g. target/debug/deps/scenarios-xyz), resolve actual nsh binary
+        if exe.to_string_lossy().contains("/deps/") {
+            if let Some(parent) = exe.parent().and_then(|p| p.parent()) {
+                let candidate = parent.join("nsh");
+                if candidate.exists() {
+                    exe = candidate;
+                }
+            }
+        }
         cmd.env("SSH_ASKPASS", &exe);
         cmd.env("SSH_ASKPASS_REQUIRE", "force");
         cmd.env("GIT_ASKPASS", &exe);

@@ -542,7 +542,18 @@ pub fn exec_cmd(cmd: &str) -> Result<String, TerminalError> {
     let mut command = std::process::Command::new("sh");
     command.arg("-c").arg(cmd);
 
-    if let Ok(socket) = std::env::var("NSH_ASKPASS_SOCKET") {
+    #[cfg(unix)]
+    unsafe {
+        use std::os::unix::process::CommandExt;
+        command.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+
+    if let Some(socket) = crate::modules::askpass::get_active_askpass_socket() {
+        crate::modules::commands::inject_askpass_env(&mut command, &socket);
+    } else if let Ok(socket) = std::env::var("NSH_ASKPASS_SOCKET") {
         crate::modules::commands::inject_askpass_env(&mut command, std::path::Path::new(&socket));
     }
 
