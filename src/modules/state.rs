@@ -230,6 +230,7 @@ pub struct App {
     pub auth_modal: AuthModalState,                 // Universal authentication & password modal
     pub input_scroll_x: usize,                      // Horizontal scroll offset for input
     pub active_plan_session: Option<PlanSession>,   // Active interactive plan review session
+    pub last_plan_session: Option<PlanSession>,     // Last generated plan session (retained after review)
     pub show_history_modal: bool,                   // Command history dialog modal is active
     pub history_modal_selected: usize,             // Currently selected history command index
     pub history_modal_scroll: usize,               // Scroll offset for history modal list
@@ -272,6 +273,7 @@ impl App {
             auth_modal: AuthModalState::default(),
             input_scroll_x: 0,
             active_plan_session: None,
+            last_plan_session: None,
             show_history_modal: false,
             history_modal_selected: 0,
             history_modal_scroll: 0,
@@ -279,8 +281,17 @@ impl App {
         }
     }
 
-    // Clear active plan session
+    // Save and activate plan session
+    pub fn save_plan_session(&mut self, session: PlanSession) {
+        self.last_plan_session = Some(session.clone());
+        self.active_plan_session = Some(session);
+    }
+
+    // Clear active plan session while preserving last_plan_session in memory
     pub fn clear_plan_session(&mut self) {
+        if let Some(ref session) = self.active_plan_session {
+            self.last_plan_session = Some(session.clone());
+        }
         self.active_plan_session = None;
     }
 

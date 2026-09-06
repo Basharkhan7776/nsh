@@ -8,7 +8,7 @@ pub mod rag;
 
 // Re-export public types and functions
 pub use ai::{create_provider, fetch_models, AiConfig, AiError, AiProvider, ProviderType};
-pub use ai::agent::{run_ai_command, AgentUpdate, AiCommand};
+pub use ai::agent::{extract_code_blocks_as_write_file, run_ai_command, AgentUpdate, AiCommand};
 pub use modules::askpass::{
     classify_prompt, get_active_askpass_socket, run_askpass_client, secure_wipe_string,
     AskPassPromptEvent, AskPassServer, AuthPromptType,

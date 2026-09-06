@@ -1,2 +1,3 @@
 - AI Auto suggestion top in suggestion in top if possible fast and optamize or we can use locally running model if possible.
 - Problem with the git branch and git logs this tui is not working add debounce
+- After plan approve it work on the that plan and create a build accordingly with that plan markdown

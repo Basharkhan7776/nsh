@@ -819,16 +819,33 @@ fn scenario_9_interactive_plan_and_build_workflow() {
     let mut app = App::new();
     assert!(app.active_plan_session.is_none());
 
+    // Verify Plan command constraints: Plan is 1-step (no tools called), Build is multi-step
+    assert_eq!(nsh::AiCommand::Plan.max_steps(), 1);
+    assert_eq!(nsh::AiCommand::Build.max_steps(), 20);
+
+    // Verify plan.md does not exist on disk
+    let _ = std::fs::remove_file("plan.md");
+    assert!(!std::path::Path::new("plan.md").exists());
+
     let goal = "Build a lightweight web server with metrics endpoint".to_string();
     let initial_plan = "# Plan (Iteration 1)\n- Setup axum router\n- Add /metrics handler".to_string();
 
-    // Step 1: Initialize session (Iteration 1)
+    // Step 1: Initialize session (Iteration 1) in memory, without writing plan.md
     app.active_plan_session = Some(PlanSession {
         goal: goal.clone(),
         current_plan: initial_plan.clone(),
         iteration: 1,
     });
     assert_eq!(app.active_plan_session.as_ref().unwrap().iteration, 1);
+    assert!(!std::path::Path::new("plan.md").exists());
+
+    // Push initial plan markdown directly into output screen entry
+    app.add_entry(Entry {
+        entry_type: EntryType::Output,
+        content: initial_plan.lines().map(|s| s.to_string()).collect(),
+        cwd: String::new(),
+    });
+    assert_eq!(app.entries.last().unwrap().content[0], "# Plan (Iteration 1)");
 
     // Step 2: User suggests change -> refine to Iteration 2
     let suggestion_1 = "include prometheus client format";
@@ -859,17 +876,36 @@ fn scenario_9_interactive_plan_and_build_workflow() {
     app.active_plan_session = Some(session);
     assert_eq!(app.active_plan_session.as_ref().unwrap().iteration, 3);
 
-    // Step 4: User approves -> triggers build transition and clears plan session
+    // Step 4: User approves or types build -> triggers build transition and retains plan in last_plan_session
     let session = app.active_plan_session.clone().unwrap();
-    let approval_input = "approve";
-    let is_approved = approval_input.eq_ignore_ascii_case("approve")
-        || approval_input.eq_ignore_ascii_case("yes")
-        || approval_input.eq_ignore_ascii_case("y")
-        || approval_input.eq_ignore_ascii_case("/approve");
-    assert!(is_approved);
+    for approval_input in &["approve", "build", "build on that plan", "/build", "yes", "proceed"] {
+        let lower = approval_input.to_ascii_lowercase();
+        let is_approved = matches!(
+            lower.as_str(),
+            "approve"
+                | "yes"
+                | "y"
+                | "/approve"
+                | "build"
+                | "/build"
+                | "build it"
+                | "build that"
+                | "build the plan"
+                | "build on that plan"
+                | "build plan"
+                | "proceed"
+                | "apply"
+                | "run"
+                | "ok"
+                | "do it"
+        );
+        assert!(is_approved, "Failed to recognize '{}' as build approval", approval_input);
+    }
 
     app.clear_plan_session();
     assert!(app.active_plan_session.is_none());
+    assert!(app.last_plan_session.is_some());
+    assert_eq!(app.last_plan_session.as_ref().unwrap().goal, goal);
 
     let build_prompt = format!(
         "Execute the following approved plan step-by-step to achieve the goal.\n\nApproved Plan:\n{}\n\nGoal: {}",
@@ -879,7 +915,41 @@ fn scenario_9_interactive_plan_and_build_workflow() {
     assert!(build_prompt.contains("/healthz"));
     assert!(build_prompt.contains("prometheus"));
 
-    // Step 5: User denies -> clears plan session cleanly
+    // Step 5: Verify shell "build on that plan" retrieves plan from last_plan_session
+    let shell_query = "on that plan";
+    let is_referring = shell_query.eq_ignore_ascii_case("on that plan");
+    assert!(is_referring);
+    let plan_from_history = app.last_plan_session.clone().unwrap();
+    assert_eq!(plan_from_history.goal, goal);
+
+    // Step 6: Verify markdown code block fallback extraction for Build mode
+    let model_code_markdown = r#"
+I will now create the files to implement the plan.
+
+### src/metrics.rs
+```rust
+pub fn init_metrics() -> String {
+    "metrics ready".to_string()
+}
+```
+
+File: Cargo.toml
+```toml
+[package]
+name = "metrics-server"
+version = "0.1.0"
+```
+"#;
+    let extracted = nsh::extract_code_blocks_as_write_file(model_code_markdown);
+    assert_eq!(extracted.len(), 2);
+    assert_eq!(extracted[0].0, "write_file");
+    assert_eq!(extracted[0].1["path"], "src/metrics.rs");
+    assert!(extracted[0].1["content"].as_str().unwrap().contains("init_metrics"));
+    assert_eq!(extracted[1].0, "write_file");
+    assert_eq!(extracted[1].1["path"], "Cargo.toml");
+    assert!(extracted[1].1["content"].as_str().unwrap().contains("metrics-server"));
+
+    // Step 7: User denies -> clears active plan session cleanly
     app.active_plan_session = Some(PlanSession {
         goal: "Temporary discarded plan".to_string(),
         current_plan: "# Discarded".to_string(),

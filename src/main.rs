@@ -1197,7 +1197,31 @@ fn main() -> std::io::Result<()> {
                                                 continue;
                                             }
                                             let lower = input.to_ascii_lowercase();
-                                            if lower == "approve" || lower == "yes" || lower == "y" || lower == "/approve" {
+                                            let is_approval = matches!(
+                                                lower.as_str(),
+                                                "approve"
+                                                    | "yes"
+                                                    | "y"
+                                                    | "/approve"
+                                                    | "build"
+                                                    | "/build"
+                                                    | "build it"
+                                                    | "build that"
+                                                    | "build the plan"
+                                                    | "build on that plan"
+                                                    | "build plan"
+                                                    | "proceed"
+                                                    | "apply"
+                                                    | "run"
+                                                    | "ok"
+                                                    | "do it"
+                                            );
+                                            let is_cancel = matches!(
+                                                lower.as_str(),
+                                                "deny" | "no" | "n" | "cancel" | "/deny" | "discard" | "stop"
+                                            );
+
+                                            if is_approval {
                                                 app.clear_plan_session();
                                                 app.current_input.clear();
                                                 app.cursor_position = 0;
@@ -1216,11 +1240,14 @@ fn main() -> std::io::Result<()> {
                                                 let storage = LocalStorage::new().unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
                                                 let build_prompt = format!(
-                                                    "Execute the following approved plan step-by-step to achieve the goal.\n\nApproved Plan:\n{}\n\nGoal: {}",
+                                                    "Execute the following approved plan step-by-step to achieve the goal.\n\
+                                                     CRITICAL: You are in autonomous BUILD mode. You MUST immediately execute tools (write_file, edit_file, mkdir, exec_cmd) to create and modify all necessary files and run tests. Do NOT output conversational text, explanations, or plans without tool calls. Start building now.\n\n\
+                                                     Approved Plan:\n{}\n\n\
+                                                     Goal: {}",
                                                     session.current_plan, session.goal
                                                 );
                                                 run_ai_task_with_ui(&mut terminal, &mut app, AiCommand::Build, &build_prompt, &ai_cfg, askpass_rx.as_ref())?;
-                                            } else if lower == "deny" || lower == "no" || lower == "n" || lower == "cancel" || lower == "/deny" {
+                                            } else if is_cancel {
                                                 app.clear_plan_session();
                                                 app.current_input.clear();
                                                 app.cursor_position = 0;
@@ -1266,17 +1293,16 @@ fn main() -> std::io::Result<()> {
                                                     let clean = plan_text.trim().to_string();
                                                     if !clean.is_empty() {
                                                         session.current_plan = clean.clone();
-                                                        let _ = std::fs::write("plan.md", &clean);
-                                                        app.active_plan_session = Some(session.clone());
+                                                        app.save_plan_session(session.clone());
 
                                                         app.add_entry(Entry {
                                                             entry_type: EntryType::System,
                                                             content: vec![
                                                                 "──────────────────────────────────────────────────────────────────────".to_string(),
-                                                                format!("Plan updated (Iteration {}). Saved to plan.md.", session.iteration),
+                                                                format!("Plan updated (Iteration {}). Review the updated plan above.", session.iteration),
                                                                 "Actions:".to_string(),
-                                                                "  • 'approve' - Execute this plan with autonomous builder".to_string(),
-                                                                "  • 'deny'    - Cancel and discard plan".to_string(),
+                                                                "  • 'approve' / 'build' - Execute this plan with autonomous builder".to_string(),
+                                                                "  • 'deny'              - Cancel and discard plan".to_string(),
                                                                 "  • Type any suggestion or feedback to refine the plan".to_string(),
                                                                 "──────────────────────────────────────────────────────────────────────".to_string(),
                                                             ],
@@ -1354,6 +1380,58 @@ fn main() -> std::io::Result<()> {
                                                     .map(|(_, q)| q.trim().to_string())
                                                     .unwrap_or_default();
 
+                                                if ai_cmd == AiCommand::Build {
+                                                    let lower_q = query.to_ascii_lowercase();
+                                                    let is_referring_to_last_plan = query.is_empty()
+                                                        || lower_q == "on that plan"
+                                                        || lower_q == "the plan"
+                                                        || lower_q == "plan"
+                                                        || lower_q == "it"
+                                                        || lower_q == "that"
+                                                        || lower_q == "approved plan"
+                                                        || lower_q == "approved";
+
+                                                    if is_referring_to_last_plan {
+                                                        if let Some(session) = app.active_plan_session.clone().or_else(|| app.last_plan_session.clone()) {
+                                                            app.clear_plan_session();
+                                                            app.add_entry(Entry {
+                                                                entry_type: EntryType::System,
+                                                                content: vec![format!("[Building from Plan] Executing build for: {}", session.goal)],
+                                                                cwd: String::new(),
+                                                            });
+
+                                                            let storage = LocalStorage::new()
+                                                                .unwrap_or_else(|_| LocalStorage::default());
+                                                            let ai_cfg = storage.load_or_create_config().ai;
+                                                            let build_prompt = format!(
+                                                                "Execute the following approved plan step-by-step to achieve the goal.\n\
+                                                                CRITICAL: You are in autonomous BUILD mode. You MUST immediately execute tools (write_file, edit_file, mkdir, exec_cmd) to create and modify all necessary files and run tests. Do NOT output conversational text, explanations, or plans without tool calls. Start building now.\n\n\
+                                                                Approved Plan:\n{}\n\n\
+                                                                Goal: {}",
+                                                                session.current_plan, session.goal
+                                                            );
+                                                            run_ai_task_with_ui(
+                                                                &mut terminal,
+                                                                &mut app,
+                                                                AiCommand::Build,
+                                                                &build_prompt,
+                                                                &ai_cfg,
+                                                                askpass_rx.as_ref(),
+                                                            )?;
+                                                            continue;
+                                                        } else if query.is_empty() {
+                                                            app.add_entry(Entry {
+                                                                entry_type: EntryType::System,
+                                                                content: vec![
+                                                                    "No previous plan found in memory. Use 'plan <goal>' first to generate a plan, or 'build <goal>' to build directly.".to_string(),
+                                                                ],
+                                                                cwd: String::new(),
+                                                            });
+                                                            continue;
+                                                        }
+                                                    }
+                                                }
+
                                                 let storage = LocalStorage::new()
                                                     .unwrap_or_else(|_| LocalStorage::default());
                                                 let ai_cfg = storage.load_or_create_config().ai;
@@ -1371,22 +1449,21 @@ fn main() -> std::io::Result<()> {
                                                     if let Some(plan_text) = final_answer {
                                                         let clean = plan_text.trim().to_string();
                                                         if !clean.is_empty() {
-                                                            let _ = std::fs::write("plan.md", &clean);
                                                             let session = PlanSession {
                                                                 goal: query.clone(),
                                                                 current_plan: clean,
                                                                 iteration: 1,
                                                             };
-                                                            app.active_plan_session = Some(session);
+                                                            app.save_plan_session(session);
 
                                                             app.add_entry(Entry {
                                                                 entry_type: EntryType::System,
                                                                 content: vec![
                                                                     "──────────────────────────────────────────────────────────────────────".to_string(),
-                                                                    "Plan generated (Iteration 1). Saved to plan.md.".to_string(),
+                                                                    "Plan generated (Iteration 1). Review the plan above.".to_string(),
                                                                     "Actions:".to_string(),
-                                                                    "  • 'approve' - Execute this plan with autonomous builder".to_string(),
-                                                                    "  • 'deny'    - Cancel and discard plan".to_string(),
+                                                                    "  • 'approve' / 'build' - Execute this plan with autonomous builder".to_string(),
+                                                                    "  • 'deny'              - Cancel and discard plan".to_string(),
                                                                     "  • Type any suggestion or feedback to refine the plan".to_string(),
                                                                     "──────────────────────────────────────────────────────────────────────".to_string(),
                                                                 ],

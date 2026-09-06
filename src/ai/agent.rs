@@ -30,7 +30,7 @@ impl AiCommand {
         match self {
             AiCommand::Ask => 2,
             AiCommand::Do => 10,
-            AiCommand::Plan => 8,
+            AiCommand::Plan => 1,
             AiCommand::Build => 20,
         }
     }
@@ -75,43 +75,48 @@ impl AiCommand {
             AiCommand::Plan => {
                 "You are an expert software planning assistant.\n\
                  Your job is to produce a clear, comprehensive, and well-structured Markdown implementation plan for the user's goal.\n\
-                 You can use read-only tools (ls, cat, grep, web_search) to explore existing code, structure, and dependencies before creating the plan.\n\
-                 Do NOT modify files or perform destructive actions in planning mode.\n\
+                 Do NOT call any tools, create files, or modify files.\n\
                  Format the plan in GitHub Flavored Markdown with the following sections:\n\
                  # Implementation Plan: <Goal Title>\n\
                  ## 1. Overview & Architecture\n\
                  ## 2. Proposed Changes & Files to Create / Modify\n\
                  ## 3. Step-by-Step Execution Plan\n\
                  ## 4. Verification & Testing Strategy\n\
-                 Be concrete, detailed, and actionable. When the plan is ready, output the Markdown document directly."
+                 Be concrete, detailed, and actionable. Output the Markdown implementation plan directly without calling tools."
             }
             AiCommand::Build => {
                 "You are an autonomous agentic software builder (similar to Grok Build).\n\
                  Your job is to build, code, and create complete working projects, features, and files.\n\
+                 CRITICAL RULE: You MUST execute tools to build the software. Never output raw code or explanations without tool calls.\n\
+                 To create a file, always call write_file.\n\
+                 To edit an existing file, call edit_file.\n\
+                 To run shell commands or tests, call exec_cmd.\n\
                  Follow this workflow:\n\
-                 1. If needed, explore existing files with ls, cat, or grep.\n\
-                 2. To create new files, use write_file.\n\
-                 3. To modify or update existing files, prefer edit_file (using start_line/end_line or target) so you do not need to rewrite the entire file.\n\
-                 4. Create directories with mkdir if needed.\n\
-                 5. You can execute shell commands or tests with exec_cmd.\n\
-                 TOOL CALL FORMATS:\n\
-                 Format 1:\n\
-                 TOOL: tool_name\n\
-                 ARGS: {\"path\": \"...\", \"content\": \"...\"}\n\
-                 Format 2 (Recommended for write_file):\n\
+                 1. Create directories with mkdir if needed.\n\
+                 2. Create new files with write_file.\n\
+                 3. Update existing files with edit_file.\n\
+                 4. Verify code with exec_cmd (e.g. cargo check, npm test, python3, etc.).\n\
+                 TOOL CALL FORMATS (use any format):\n\
+                 Format 1 (Recommended for write_file):\n\
                  TOOL: write_file\n\
                  PATH: path/to/file.ext\n\
                  CONTENT:\n\
                  <file content here>\n\
-                 Format 3 (Recommended for edit_file):\n\
+                 Format 2 (Recommended for edit_file):\n\
                  TOOL: edit_file\n\
                  PATH: path/to/file.ext\n\
                  START_LINE: 10\n\
                  END_LINE: 15\n\
                  REPLACEMENT:\n\
                  <replacement lines here>\n\
+                 Format 3 (JSON):\n\
+                 TOOL: tool_name\n\
+                 ARGS: {\"path\": \"...\", \"content\": \"...\"}\n\
+                 Format 4 (DSML / XML invoke tags):\n\
+                 <invoke name=\"write_file\"><parameter name=\"path\">...</parameter><parameter name=\"content\">...</parameter></invoke>\n\
                  After each tool call, you will receive the Observation. Continue calling tools until all files and tasks are fully built.\n\
-                 When finished building, output a short summary of created/modified files and what was built."
+                 Do not stop until all code files specified in the plan are written to disk.\n\
+                 When completely finished building, output a short summary of created files and what was built."
             }
         }
     }
@@ -546,13 +551,12 @@ pub async fn run_ai_command(
 
     let (clean_query, ref_contexts) = resolve_file_references(user_query, &cwd);
 
-    let tool_defs = get_tool_definitions();
-    let tools_json = serde_json::to_string(&tool_defs).unwrap_or_default();
-
-    let mut history: Vec<String> = vec![
-        format!("System: {}", cmd.system_prompt()),
-        format!("Tools available:\n{}", tools_json),
-    ];
+    let mut history: Vec<String> = vec![format!("System: {}", cmd.system_prompt())];
+    if cmd != AiCommand::Plan {
+        let tool_defs = get_tool_definitions();
+        let tools_json = serde_json::to_string(&tool_defs).unwrap_or_default();
+        history.push(format!("Tools available:\n{}", tools_json));
+    }
     if !rag_context.is_empty() {
         history.push(rag_context);
     }
@@ -603,8 +607,21 @@ pub async fn run_ai_command(
             }
         }
 
-        // Parse tool calls (supports one or multiple TOOL: blocks per response)
-        let tool_calls = parse_tool_calls(&response);
+        // Parse tool calls (disabled in Plan mode so no tools or modifications are executed)
+        let mut tool_calls = if cmd == AiCommand::Plan {
+            Vec::new()
+        } else {
+            parse_tool_calls(&response)
+        };
+
+        // Fallback for Build and Do modes: if model outputted markdown code blocks with file headers, extract them as write_file calls
+        if tool_calls.is_empty() && (cmd == AiCommand::Build || cmd == AiCommand::Do) {
+            let extracted_files = extract_code_blocks_as_write_file(&response);
+            if !extracted_files.is_empty() {
+                tool_calls = extracted_files;
+            }
+        }
+
         if !tool_calls.is_empty() {
             history.push(format!("Assistant: {}", response.trim()));
 
@@ -664,6 +681,16 @@ pub async fn run_ai_command(
             // Continue to next turn to let model inspect observations or do next steps
             continue;
         } else {
+            // In autonomous Build mode, if no tools were executed on step 0, prompt the model once to start executing tools
+            if _step == 0 && cmd == AiCommand::Build && tools_executed == 0 {
+                history.push(format!("Assistant: {}", response.trim()));
+                history.push(
+                    "Observation: You did not call any tools. You are in autonomous BUILD mode. You must execute tools using the TOOL: format (e.g. TOOL: write_file, TOOL: edit_file, TOOL: exec_cmd) to write files to disk. Start calling tools now to implement the approved plan."
+                        .to_string(),
+                );
+                continue;
+            }
+
             // Final answer
             final_answer = Some(response.trim().to_string());
             break;
@@ -1479,6 +1506,103 @@ pub fn parse_tool_calls(text: &str) -> Vec<(String, serde_json::Value)> {
         }
     }
 
+    calls
+}
+
+fn is_valid_file_path(s: &str) -> bool {
+    let clean = s.trim_matches('`').trim_matches('\'').trim_matches('"').trim();
+    if clean.is_empty() || clean.contains(' ') || clean.contains('(') || clean.contains(')') {
+        return false;
+    }
+    if let Some((_stem, ext)) = clean.rsplit_once('.') {
+        !ext.is_empty() && ext.len() <= 6 && ext.chars().all(|c| c.is_alphanumeric())
+    } else {
+        false
+    }
+}
+
+/// Fallback extractor for markdown code blocks with file headers when model does not use TOOL: tags
+pub fn extract_code_blocks_as_write_file(text: &str) -> Vec<(String, serde_json::Value)> {
+    let mut calls = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i].trim();
+
+        let mut file_path: Option<String> = None;
+
+        // Pattern 1: Header line: "### `src/main.rs`", "## src/lib.rs", "# Cargo.toml"
+        if let Some(rest) = line.strip_prefix("###").or_else(|| line.strip_prefix("##")).or_else(|| line.strip_prefix("#")) {
+            let candidate = rest.trim().trim_matches('`').trim_matches('*').trim();
+            if is_valid_file_path(candidate) {
+                file_path = Some(candidate.to_string());
+            }
+        }
+        // Pattern 2: "File: src/main.rs", "**File**: `src/main.rs`", "Path: src/main.rs"
+        else if line.to_ascii_lowercase().starts_with("file:")
+            || line.to_ascii_lowercase().starts_with("**file**:")
+            || line.to_ascii_lowercase().starts_with("path:")
+        {
+            let colon_idx = line.find(':').unwrap();
+            let rest = line[colon_idx + 1..].trim().trim_matches('`').trim_matches('*').trim();
+            let candidate = rest.split_whitespace().next().unwrap_or("");
+            if is_valid_file_path(candidate) {
+                file_path = Some(candidate.to_string());
+            }
+        }
+        // Pattern 3: "**src/main.rs**"
+        else if line.starts_with("**") && line.ends_with("**") && line.len() > 4 {
+            let candidate = line[2..line.len() - 2].trim().trim_matches('`').trim();
+            if is_valid_file_path(candidate) {
+                file_path = Some(candidate.to_string());
+            }
+        }
+        // Pattern 4: Code fence with filename: ```rust:src/main.rs or ```rust filename="src/main.rs"
+        else if line.starts_with("```") {
+            let fence_rest = line.trim_start_matches('`').trim();
+            if let Some((_lang, path_part)) = fence_rest.split_once(':') {
+                let candidate = path_part.trim().trim_matches('"').trim_matches('\'').trim();
+                if is_valid_file_path(candidate) {
+                    file_path = Some(candidate.to_string());
+                }
+            } else if let Some(idx) = fence_rest.find("filename=") {
+                let candidate = fence_rest[idx + 9..].trim().trim_matches('"').trim_matches('\'').trim();
+                let candidate_path = candidate.split_whitespace().next().unwrap_or("").trim_matches('"').trim_matches('\'');
+                if is_valid_file_path(candidate_path) {
+                    file_path = Some(candidate_path.to_string());
+                }
+            }
+        }
+
+        if let Some(path) = file_path {
+            // Look forward for opening ```
+            let mut j = if line.starts_with("```") { i } else { i + 1 };
+            while j < lines.len() && !lines[j].trim().starts_with("```") && (j - i) <= 3 {
+                j += 1;
+            }
+            if j < lines.len() && lines[j].trim().starts_with("```") {
+                let fence_start = j + 1;
+                let mut fence_end = fence_start;
+                while fence_end < lines.len() && !lines[fence_end].trim().starts_with("```") {
+                    fence_end += 1;
+                }
+                if fence_end < lines.len() {
+                    let content = lines[fence_start..fence_end].join("\n");
+                    calls.push((
+                        "write_file".to_string(),
+                        serde_json::json!({
+                            "path": path,
+                            "content": content,
+                        }),
+                    ));
+                    i = fence_end + 1;
+                    continue;
+                }
+            }
+        }
+
+        i += 1;
+    }
     calls
 }
 

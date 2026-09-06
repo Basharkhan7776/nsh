@@ -133,7 +133,7 @@ sequenceDiagram
     Agent->>LLM: Generate implementation plan and analyze environment
     LLM-->>Agent: Reasoning trace and Markdown Plan
     Agent-->>App: AgentUpdate::Completed(Plan)
-    App->>User: Display Plan Iteration 1 and Save plan.md
+    App->>User: Display Plan Iteration 1 on Output Screen
 
     alt User Provides Feedback
         User->>App: "Use PostgreSQL instead of SQLite"
@@ -327,7 +327,7 @@ nsh: ~$ scp archive.tar vps:/tmp # File copy with in-TUI progress and credential
 nsh: ~$ ask "Which system service consumed the most CPU in the last hour?"
 nsh: ~$ do "Find all unused dependencies in Cargo.toml and remove them"
 nsh: ~$ plan "Architect an event-driven microservice in Rust with axum and tokio"
-nsh: ~$ build "Implement the approved plan.md specification"
+nsh: ~$ build "Implement the approved plan specification"
 
 # Configuration & Subsystem Control
 nsh: ~$ settings                # Opens interactive full-screen AI configuration TUI
